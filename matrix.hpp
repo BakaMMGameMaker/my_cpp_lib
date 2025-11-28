@@ -5,7 +5,6 @@
 #include <stdexcept>
 #include <vector>
 
-
 template <typename T> class Matrix2D {
     static_assert(!std::is_same_v<T, bool>, "Matrix2D does not support bool, use char instead");
 
@@ -22,8 +21,6 @@ public:
     Matrix2D &operator=(Matrix2D &&) noexcept = default;
 
     [[nodiscard]] static Matrix2D SafeCreate(std::size_t rows, std::size_t cols, const T &default_value = T{}) {
-        if (rows == 0 || cols == 0)
-            throw std::invalid_argument("Matrix2D::SafeCreate: Dimensions must be positive (rows > 0 and cols > 0)");
         // 检查乘法溢出
         if (rows > std::numeric_limits<std::size_t>::max() / cols)
             throw std::overflow_error("Matrix2D::SafeCreate: Total size (rows * cols) exceeds std::size_t limit");
@@ -108,8 +105,6 @@ public:
     FlatMatrix2D &operator=(FlatMatrix2D &&) noexcept = default;
 
     [[nodiscard]] static FlatMatrix2D SafeCreate(std::size_t rows, std::size_t cols, const T &default_value = T{}) {
-        if (rows == 0 || cols == 0)
-            throw std::invalid_argument("FlatMatrix2D::SafeCreate: Dimensions must be positive");
         if (rows > std::numeric_limits<std::size_t>::max() / cols)
             throw std::overflow_error("FlatMatrix2D::SafeCreate: Total size exceeds std::size_t limit");
         return FlatMatrix2D(rows, cols, default_value);
