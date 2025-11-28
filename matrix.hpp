@@ -30,6 +30,18 @@ public:
         return Matrix2D(rows, cols, default_value);
     }
 
+    void Assign(std::size_t new_rows, std::size_t new_cols, const T &default_value = T{}) {
+        data_.assign(new_rows, std::vector<T>(new_cols, default_value));
+    }
+    void SafeAssign(std::size_t new_rows, std::size_t new_cols, const T &default_value = T{}) {
+        if (new_cols != 0 && new_rows > std::numeric_limits<std::size_t>::max() / new_cols)
+            throw std::overflow_error("Matrix2D::Assign: Total size (new_rows * new_cols) exceeds std::size_t limit");
+        data_.assign(new_rows, std::vector<T>(new_cols, default_value));
+    }
+    void Fill(const T &value) {
+        for (auto &row : data_) { std::fill(row.begin(), row.end(), value); }
+    }
+
     constexpr std::size_t rows() const noexcept { return data_.size(); }
     constexpr std::size_t cols() const noexcept { return data_.empty() ? 0 : data_[0].size(); }
     constexpr std::size_t size() const noexcept { return rows() * cols(); }
@@ -113,6 +125,20 @@ public:
         return FlatMatrix2D(rows, cols, default_value);
     }
 
+    void Assign(std::size_t new_rows, std::size_t new_cols, const T &default_value = T{}) {
+        data_.assign(new_rows * new_cols, default_value);
+        rows_ = new_rows;
+        cols_ = new_cols;
+    }
+    void SafeAssign(std::size_t new_rows, std::size_t new_cols, const T &default_value = T{}) {
+        if (new_rows > std::numeric_limits<std::size_t>::max() / new_cols)
+            throw std::overflow_error("FlatMatrix2D::Resize: Total size exceeds limit");
+        data_.assign(new_rows * new_cols, default_value);
+        rows_ = new_rows;
+        cols_ = new_cols;
+    }
+    void Fill(const T &value) { std::fill(data_.begin(), data_.end(), value); }
+
     [[nodiscard]] constexpr std::size_t rows() const noexcept { return rows_; }
     [[nodiscard]] constexpr std::size_t cols() const noexcept { return cols_; }
     [[nodiscard]] constexpr std::size_t size() const noexcept { return data_.size(); }
@@ -169,12 +195,4 @@ public:
     }
     [[nodiscard]] const T &At(std::size_t row, std::size_t col) const noexcept { return data_[index(row, col)]; }
     [[nodiscard]] T &At(std::size_t row, std::size_t col) noexcept { return data_[index(row, col)]; }
-
-    void Resize(std::size_t new_rows, std::size_t new_cols, const T &default_value = T{}) {
-        if (new_rows > std::numeric_limits<std::size_t>::max() / new_cols)
-            throw std::overflow_error("FlatMatrix2D::Resize: Total size exceeds limit");
-        data_.assign(new_rows * new_cols, default_value);
-        rows_ = new_rows;
-        cols_ = new_cols;
-    }
 };
