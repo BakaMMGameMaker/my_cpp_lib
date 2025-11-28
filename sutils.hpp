@@ -2,7 +2,9 @@
 #include "salias.h"
 #include <concepts>
 #include <cstddef>
+#include <iterator>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 template <typename T>
@@ -48,8 +50,8 @@ constexpr std::size_t SafeCastSizeT(T value) {
     return static_cast<std::size_t>(value);
 }
 
-template <typename T>
-concept LenAble = requires(const T &c) {
+template <typename Container>
+concept LenAble = requires(const Container &c) {
     { c.size() } -> std::convertible_to<std::size_t>;
 };
 
@@ -60,6 +62,21 @@ int len(const char *) = delete;
 int len(char *) = delete;
 int len(std::string_view) = delete;
 inline int len(bool) = delete;
+
+template <typename Container>
+concept SumAble = requires(const Container &c) {
+    c.begin();
+    c.end();
+};
+
+template <SumAble Container> constexpr auto sum(const Container &c) {
+    using std::begin;
+    using std::end;
+    using ValueType = std::remove_cvref_t<decltype(*begin(c))>;
+    ValueType result{};
+    for (const auto &value : c) result += value;
+    return result;
+}
 
 Int2D CreateInt2D(size_t rows, size_t cols, int value = 0);
 UInt2D CreateUInt2D(size_t rows, size_t cols, size_t value = 0);
