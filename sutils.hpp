@@ -1,8 +1,9 @@
 #pragma once
+#include "salias.h"
 #include <concepts>
+#include <cstddef>
 #include <stdexcept>
 #include <utility>
-#include <vector>
 
 template <typename T>
     requires std::convertible_to<T, std::size_t>
@@ -59,3 +60,7 @@ int len(const char *) = delete;
 int len(char *) = delete;
 int len(std::string_view) = delete;
 inline int len(bool) = delete;
+
+Int2D CreateInt2D(size_t rows, size_t cols, int value = 0);
+UInt2D CreateUInt2D(size_t rows, size_t cols, size_t value = 0);
+Bool2D CreateBool2D(size_t rows, size_t cols, bool value = false);
