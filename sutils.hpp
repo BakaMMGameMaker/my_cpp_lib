@@ -78,6 +78,10 @@ template <SumAble Container> constexpr auto sum(const Container &c) {
     return result;
 }
 
+template <typename T> Vec2D<T> CreateVec2D(size_t rows, size_t cols, T value = T{}) {
+    return Vec2D<T>(rows, Vec1D<T>(cols, value));
+}
+
 Int2D CreateInt2D(size_t rows, size_t cols, int value = 0);
 UInt2D CreateUInt2D(size_t rows, size_t cols, size_t value = 0);
 Bool2D CreateBool2D(size_t rows, size_t cols, bool value = false);

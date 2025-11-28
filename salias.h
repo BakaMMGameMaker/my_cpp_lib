@@ -11,7 +11,3 @@ using UInt1D = Vec1D<size_t>;
 using UInt2D = Vec2D<size_t>;
 using Bool1D = Vec1D<char>;
 using Bool2D = Vec2D<char>;
-
-template <typename T> Vec2D<T> CreateVec2D(size_t rows, size_t cols, T value = T{}) {
-    return Vec2D<T>(rows, Vec1D<T>(cols, value));
-}
