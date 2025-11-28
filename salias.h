@@ -8,3 +8,5 @@ using Int1D = Vec1D<int>;
 using Int2D = Vec2D<int>;
 using Bool1D = Vec1D<char>;
 using Bool2D = Vec2D<char>;
+
+template <typename T> auto CreateVec2D(int rows, int cols, T value) { return Vec2D<T>(rows, Vec1D<T>(cols, value)); }
