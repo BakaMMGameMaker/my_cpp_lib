@@ -22,7 +22,7 @@ public:
 
     [[nodiscard]] static Matrix2D SafeCreate(std::size_t rows, std::size_t cols, const T &default_value = T{}) {
         // 检查乘法溢出
-        if (rows > std::numeric_limits<std::size_t>::max() / cols)
+        if (cols != 0 && rows > std::numeric_limits<std::size_t>::max() / cols)
             throw std::overflow_error("Matrix2D::SafeCreate: Total size (rows * cols) exceeds std::size_t limit");
         return Matrix2D(rows, cols, default_value);
     }
@@ -105,7 +105,7 @@ public:
     FlatMatrix2D &operator=(FlatMatrix2D &&) noexcept = default;
 
     [[nodiscard]] static FlatMatrix2D SafeCreate(std::size_t rows, std::size_t cols, const T &default_value = T{}) {
-        if (rows > std::numeric_limits<std::size_t>::max() / cols)
+        if (cols != 0 && rows > std::numeric_limits<std::size_t>::max() / cols)
             throw std::overflow_error("FlatMatrix2D::SafeCreate: Total size exceeds std::size_t limit");
         return FlatMatrix2D(rows, cols, default_value);
     }
