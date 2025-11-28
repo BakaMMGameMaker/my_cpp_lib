@@ -1,0 +1,55 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "format",
+            "type": "shell",
+            "command": "clang-format -i main.cpp"
+        },
+        {
+            "label": "tidy",
+            "type": "shell",
+            "command": "clang-tidy main.cpp -- -std=c++23"
+        },
+        {
+            "label": "build",
+            "type": "shell",
+            "command": "clang++",
+            "args": [
+                "-std=c++23",
+                "-Wall",
+                "-Wextra",
+                "-O2",
+                "main.cpp",
+                "-o",
+                "main.exe"
+            ]
+        },
+        {
+            "label": "run",
+            "type": "shell",
+            "command": "cmd",
+            "args": [
+                "/c",
+                "start",
+                "cmd",
+                "/k",
+                "main.exe"
+            ]
+        },
+        {
+            "label": "full-pipeline",
+            "dependsOn": [
+                "format",
+                "tidy",
+                "build",
+                "run"
+            ],
+            "dependsOrder": "sequence",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ]
+}

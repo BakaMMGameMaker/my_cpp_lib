@@ -1,0 +1,8 @@
+IndentWidth: 4
+ColumnLimit: 120
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortBlocksOnASingleLine: true
+AllowShortLoopsOnASingleLine: true
+AccessModifierOffset: -4
+IndentAccessModifiers: false
+AlwaysBreakAfterReturnType: None
