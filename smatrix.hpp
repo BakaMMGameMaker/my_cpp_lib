@@ -5,29 +5,29 @@
 #include <stdexcept>
 #include <vector>
 
-template <typename T> class Matrix2D {
+template <typename T> class SMatrix2D {
     static_assert(!std::is_same_v<T, bool>, "Matrix2D does not support bool, use char instead");
 
 private:
     std::vector<std::vector<T>> data_;
 
-    Matrix2D(std::size_t rows, std::size_t cols, const T &default_value = T{})
+    SMatrix2D(std::size_t rows, std::size_t cols, const T &default_value = T{})
         : data_(rows, std::vector<T>(cols, default_value)) {}
 
 public:
-    Matrix2D(const Matrix2D &) = default;
-    Matrix2D(Matrix2D &&) noexcept = default;
-    Matrix2D &operator=(const Matrix2D &) = default;
-    Matrix2D &operator=(Matrix2D &&) noexcept = default;
+    SMatrix2D(const SMatrix2D &) = default;
+    SMatrix2D(SMatrix2D &&) noexcept = default;
+    SMatrix2D &operator=(const SMatrix2D &) = default;
+    SMatrix2D &operator=(SMatrix2D &&) noexcept = default;
 
-    [[nodiscard]] static Matrix2D SafeCreate(std::size_t rows, std::size_t cols, const T &default_value = T{}) {
+    [[nodiscard]] static SMatrix2D SafeCreate(std::size_t rows, std::size_t cols, const T &default_value = T{}) {
         // 检查乘法溢出
         if (cols != 0 && rows > std::numeric_limits<std::size_t>::max() / cols)
             throw std::overflow_error("Matrix2D::SafeCreate: Total size (rows * cols) exceeds std::size_t limit");
-        return Matrix2D(rows, cols, default_value);
+        return SMatrix2D(rows, cols, default_value);
     }
-    [[nodiscard]] static Matrix2D Create(std::size_t rows, std::size_t cols, const T &default_value = T{}) {
-        return Matrix2D(rows, cols, default_value);
+    [[nodiscard]] static SMatrix2D Create(std::size_t rows, std::size_t cols, const T &default_value = T{}) {
+        return SMatrix2D(rows, cols, default_value);
     }
 
     void Assign(std::size_t new_rows, std::size_t new_cols, const T &default_value = T{}) {
@@ -95,7 +95,7 @@ public:
     [[nodiscard]] T &At(std::size_t row, std::size_t col) noexcept { return data_[row][col]; }
 };
 
-template <typename T> class FlatMatrix2D {
+template <typename T> class SFlatMatrix2D {
     static_assert(!std::is_same_v<T, bool>, "FlatMatrix2D does not support bool, use char instead");
 
 private:
@@ -103,7 +103,7 @@ private:
     std::size_t rows_{0};
     std::size_t cols_{0};
 
-    FlatMatrix2D(std::size_t rows, std::size_t cols, const T &default_value)
+    SFlatMatrix2D(std::size_t rows, std::size_t cols, const T &default_value)
         : data_(rows * cols, default_value), rows_(rows), cols_(cols) {}
 
     [[nodiscard]] constexpr std::size_t index(std::size_t row, std::size_t col) const noexcept {
@@ -111,18 +111,18 @@ private:
     }
 
 public:
-    FlatMatrix2D(const FlatMatrix2D &) = default;
-    FlatMatrix2D(FlatMatrix2D &&) noexcept = default;
-    FlatMatrix2D &operator=(const FlatMatrix2D &) = default;
-    FlatMatrix2D &operator=(FlatMatrix2D &&) noexcept = default;
+    SFlatMatrix2D(const SFlatMatrix2D &) = default;
+    SFlatMatrix2D(SFlatMatrix2D &&) noexcept = default;
+    SFlatMatrix2D &operator=(const SFlatMatrix2D &) = default;
+    SFlatMatrix2D &operator=(SFlatMatrix2D &&) noexcept = default;
 
-    [[nodiscard]] static FlatMatrix2D SafeCreate(std::size_t rows, std::size_t cols, const T &default_value = T{}) {
+    [[nodiscard]] static SFlatMatrix2D SafeCreate(std::size_t rows, std::size_t cols, const T &default_value = T{}) {
         if (cols != 0 && rows > std::numeric_limits<std::size_t>::max() / cols)
             throw std::overflow_error("FlatMatrix2D::SafeCreate: Total size exceeds std::size_t limit");
-        return FlatMatrix2D(rows, cols, default_value);
+        return SFlatMatrix2D(rows, cols, default_value);
     }
-    [[nodiscard]] static FlatMatrix2D Create(std::size_t rows, std::size_t cols, const T &default_value = T{}) {
-        return FlatMatrix2D(rows, cols, default_value);
+    [[nodiscard]] static SFlatMatrix2D Create(std::size_t rows, std::size_t cols, const T &default_value = T{}) {
+        return SFlatMatrix2D(rows, cols, default_value);
     }
 
     void Assign(std::size_t new_rows, std::size_t new_cols, const T &default_value = T{}) {

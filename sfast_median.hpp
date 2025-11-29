@@ -3,7 +3,7 @@
 #include <queue>
 #include <vector>
 
-template <typename T> class FastMedian {
+template <typename T> class SFastMedian {
 
     static_assert(std::is_arithmetic_v<T>, "T must be arithmetic");
 
