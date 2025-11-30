@@ -13,15 +13,63 @@
 #include <string_view>
 #include <vector>
 
+// CRTP base
+template <typename Derived> class TriesBase {
+protected:
+    TriesBase() = default;
+    ~TriesBase() = default;
+
+    TriesBase(const TriesBase &) = delete;
+    TriesBase &operator=(const TriesBase &) = delete;
+    TriesBase(TriesBase &&) = delete;
+    TriesBase &operator=(TriesBase &&) = delete;
+
+    [[nodiscard]] Derived &derived() noexcept { return static_cast<Derived &>(*this); }
+    [[nodiscard]] const Derived &derived() const noexcept { return static_cast<const Derived &>(*this); }
+
+    mutable std::shared_mutex shared_mutex_;
+
+public:
+    // 添加新的单词
+    void push(std::string_view word) {
+        std::unique_lock<std::shared_mutex> write_lock(shared_mutex_);
+        derived().push_impl(word);
+    }
+
+    // 移除给定单词，返回移除是否成功
+    bool erase(std::string_view word) {
+        std::unique_lock<std::shared_mutex> write_lock(shared_mutex_);
+        return derived().erase_impl(word);
+    }
+
+    // 查找是否包含给定单词
+    [[nodiscard]] bool contains(std::string_view word) const noexcept {
+        std::shared_lock<std::shared_mutex> read_lock(shared_mutex_);
+        return derived().contains_impl(word);
+    }
+
+    [[nodiscard]] bool contains_starts_with(std::string_view prefix) const noexcept {
+        std::shared_lock<std::shared_mutex> read_lock(shared_mutex_);
+        return derived().contains_starts_with_impl(prefix);
+    }
+
+    // 获取所有以 prefix 为前缀的单词，最多 limit 个
+    [[nodiscard]] std::vector<std::string> prefix_search(std::string_view prefix, SizeT limit = SizeMax) const {
+        std::shared_lock<std::shared_mutex> read_lock(shared_mutex_);
+        return derived().prefix_search_impl(prefix, limit);
+    }
+};
+
 // 原生的链式结构 Tries
-class STries {
+class STries : public TriesBase<STries> {
+    friend class TriesBase<STries>;
+
     struct Node {
-        // 使用 map 来确保 children 有序，dfs 结果明确
         std::map<char, std::unique_ptr<Node>> children;
         bool is_end = false;
     };
+
     std::unique_ptr<Node> root = std::make_unique<Node>();
-    mutable std::shared_mutex shared_mutex; // 读写锁：支持多线程读，写独占
 
     // 深度优先搜索收集结果
     void dfs(const Node *node, std::string &current_word, std::vector<std::string> &result,
@@ -42,7 +90,7 @@ class STries {
 
     // 定位前缀对应的节点
     [[nodiscard]] const Node *find_node(std::string_view prefix) const noexcept {
-        auto current_node = root.get();
+        const Node *current_node = root.get();
         for (char ch : prefix) {
             auto it = current_node->children.find(ch);
             if (it == current_node->children.end()) return nullptr;
@@ -51,17 +99,8 @@ class STries {
         return current_node;
     }
 
-public:
-    STries() = default;
-    STries(const STries &) = delete;
-    STries &operator=(const STries &) = delete;
-    STries(STries &&) = delete;
-    STries &operator=(STries &&) = delete;
-
-    // 添加新的单词
-    void push(std::string_view word) {
-        std::unique_lock<std::shared_mutex> write_lock(shared_mutex); // 写独占
-        auto current_node = root.get();
+    void push_impl(std::string_view word) {
+        Node *current_node = root.get();
         for (char ch : word) {
             auto it = current_node->children.find(ch);
             if (it == current_node->children.end()) {
@@ -73,51 +112,46 @@ public:
         current_node->is_end = true;
     }
 
-    // 查找是否包含给定单词
-    [[nodiscard]] bool contains(std::string_view word) const noexcept {
-        std::shared_lock<std::shared_mutex> read_lock(shared_mutex); // 多线程读
-        auto node = find_node(word);
-        return node && node->is_end;
+    [[nodiscard]] bool contains_impl(std::string_view word) const noexcept {
+        const Node *node = find_node(word);
+        return node != nullptr && node->is_end;
     }
 
-    // 移除给定单词，返回移除是否成功
-    bool erase(std::string_view word) {
-        std::unique_lock<std::shared_mutex> write_lock(shared_mutex);
-        auto current_node = root.get();
+    bool erase_impl(std::string_view word) {
+        Node *current_node = root.get();
         std::vector<std::pair<Node *, char>> path; // 记录路径
         path.reserve(word.size());
+
         for (char ch : word) {
             auto it = current_node->children.find(ch);
             if (it == current_node->children.end()) return false; // word 不存在
             path.emplace_back(current_node, ch);
             current_node = it->second.get();
         }
+
         if (!current_node->is_end) return false; // 当前单词仅为前缀，非完整单词
         current_node->is_end = false;            // 把单词末尾标记为非 end
+        if (!current_node->children.empty()) return true;
+
         for (auto it = path.rbegin(); it != path.rend(); ++it) {
-            auto parent = it->first;
+            Node *parent = it->first;
             char edge = it->second;
             auto child_it = parent->children.find(edge);
             if (child_it == parent->children.end()) break;
-            auto child = child_it->second.get();
-            if (child->is_end || !child->children.empty()) break;
-            // 不作为某单词的结尾，也没有任何孩子（意味着不作为任何单词的前缀部分）
+            const Node *child = child_it->second.get();
+            if (child->is_end || !child->children.empty()) break; // 不作为某单词的结尾，也不属于任何单词的前缀部分
             parent->children.erase(child_it);
         }
         return true;
     }
 
     // 查找树中是否有以 prefix 为前缀的单词
-    [[nodiscard]] bool contains_starts_with(std::string_view prefix) const noexcept {
-        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
-        return find_node(prefix);
-    }
+    [[nodiscard]] bool contains_starts_with_impl(std::string_view prefix) const noexcept { return find_node(prefix); }
 
     // 获取所有以 prefix 为前缀的单词，最多 limit 个
-    [[nodiscard]] std::vector<std::string> prefix_search(std::string_view prefix, SizeT limit = SizeMax) const {
-        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
-        auto start_node = find_node(prefix);
-        if (!start_node) return {};
+    [[nodiscard]] std::vector<std::string> prefix_search_impl(std::string_view prefix, SizeT limit = SizeMax) const {
+        const Node *start_node = find_node(prefix);
+        if (start_node == nullptr) return {};
 
         std::vector<std::string> result;
         result.reserve(limit == SizeMax ? 16 : limit);
@@ -125,10 +159,15 @@ public:
         dfs(start_node, current_word, result, limit);
         return result;
     }
+
+public:
+    STries() = default;
 };
 
 // 使用对象池存储节点
-class SFlatTries {
+class SFlatTries : public TriesBase<SFlatTries> {
+    friend class TriesBase<SFlatTries>;
+
     struct Node {
         std::map<char, UInt32> children;
         bool is_end = false;
@@ -136,7 +175,6 @@ class SFlatTries {
 
     std::vector<Node> node_pool; // index 是在池中的下标
     static constexpr UInt32 invalid_index = std::numeric_limits<UInt32>::max();
-    mutable std::shared_mutex shared_mutex;
 
     UInt32 create_node() {
         node_pool.emplace_back();
@@ -172,19 +210,7 @@ class SFlatTries {
         return current_node_index;
     }
 
-public:
-    SFlatTries() : node_pool(), shared_mutex() {
-        node_pool.reserve(1024);
-        create_node();
-    }
-    SFlatTries(const SFlatTries &) = delete;
-    SFlatTries &operator=(const SFlatTries &) = delete;
-    SFlatTries(SFlatTries &&) = delete;
-    SFlatTries &operator=(SFlatTries &&) = delete;
-
-    // 添加新的单词
-    void push(std::string_view word) {
-        std::unique_lock<std::shared_mutex> write_lock(shared_mutex);
+    void push_impl(std::string_view word) {
         UInt32 current_node_index = 0; // root
         for (char ch : word) {
             // 这里不应该使用引用，即便是单线程，create node 也会导致悬空引用
@@ -201,17 +227,17 @@ public:
     }
 
     // 查找是否包含给定单词
-    [[nodiscard]] bool contains(std::string_view word) const noexcept {
-        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+    [[nodiscard]] bool contains_impl(std::string_view word) const noexcept {
         UInt32 node_index = find_node_index(word);
         return node_index != invalid_index && node_pool[node_index].is_end;
     }
 
     // 移除给定单词，返回移除是否成功
-    bool erase(std::string_view word) {
+    bool erase_impl(std::string_view word) {
         UInt32 current_node_index = 0; // root
         std::vector<std::pair<UInt32, char>> path;
         path.reserve(word.size());
+
         for (char ch : word) {
             Node &current_node = node_pool[current_node_index];
             auto it = current_node.children.find(ch);
@@ -239,14 +265,12 @@ public:
     }
 
     // 查找树中是否有以 prefix 为前缀的单词
-    [[nodiscard]] bool contains_starts_with(std::string_view prefix) const noexcept {
-        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+    [[nodiscard]] bool contains_starts_with_impl(std::string_view prefix) const noexcept {
         return find_node_index(prefix) != invalid_index;
     }
 
     // 获取所有以 prefix 为前缀的单词，最多 limit 个
-    [[nodiscard]] std::vector<std::string> prefix_search(std::string_view prefix, SizeT limit = SizeMax) const {
-        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+    [[nodiscard]] std::vector<std::string> prefix_search_impl(std::string_view prefix, SizeT limit = SizeMax) const {
         UInt32 start_node_index = find_node_index(prefix);
         if (start_node_index == invalid_index) return {};
 
@@ -256,10 +280,18 @@ public:
         dfs(start_node_index, current_word, result, limit);
         return result;
     }
+
+public:
+    SFlatTries() : node_pool() {
+        node_pool.reserve(1024);
+        create_node();
+    }
 };
 
 // 允许用户提供 memory resource
-class SPmrFlatTries {
+class SPmrFlatTries : public TriesBase<SPmrFlatTries> {
+    friend class TriesBase<SPmrFlatTries>;
+
     struct Node {
         std::pmr::map<char, UInt32> children;
         bool is_end = false;
@@ -269,7 +301,6 @@ class SPmrFlatTries {
     std::pmr::vector<Node> node_pool;
     std::pmr::memory_resource *memory_resource;
     static constexpr UInt32 invalid_index = std::numeric_limits<UInt32>::max();
-    mutable std::shared_mutex shared_mutex;
 
     UInt32 create_node() {
         node_pool.emplace_back(memory_resource);
@@ -304,21 +335,8 @@ class SPmrFlatTries {
         return current_node_index;
     }
 
-public:
-    explicit SPmrFlatTries(std::pmr::memory_resource *resource)
-        : node_pool(resource), memory_resource(resource), shared_mutex() {
-        node_pool.reserve(1024);
-        create_node();
-    }
-
-    SPmrFlatTries(const SPmrFlatTries &) = delete;
-    SPmrFlatTries &operator=(const SPmrFlatTries &) = delete;
-    SPmrFlatTries(SPmrFlatTries &&) = delete;
-    SPmrFlatTries &operator=(SPmrFlatTries &&) = delete;
-
     // 添加新的单词
-    void push(std::string_view word) {
-        std::unique_lock<std::shared_mutex> write_lock(shared_mutex);
+    void push_impl(std::string_view word) {
         UInt32 current_node_index = 0; // root
         for (char ch : word) {
             // 这里不应该使用引用，即便是单线程，create node 也会导致悬空引用
@@ -335,17 +353,15 @@ public:
     }
 
     // 查找是否包含给定的单词
-    [[nodiscard]] bool contains(std::string_view word) const noexcept {
-        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+    [[nodiscard]] bool contains_impl(std::string_view word) const noexcept {
         UInt32 node_index = find_node_index(word);
         return node_index != invalid_index && node_pool[node_index].is_end;
     }
 
     // 移除给定单词，返回移除是否成功
-    bool erase(std::string_view word) {
-        std::unique_lock<std::shared_mutex> write_lock(shared_mutex);
+    bool erase_impl(std::string_view word) {
         UInt32 current_node_index = 0; // root
-        std::vector<std::pair<UInt32, char>> path;
+        std::pmr::vector<std::pair<UInt32, char>> path(memory_resource);
         path.reserve(word.size());
         for (char ch : word) {
             Node &current_node = node_pool[current_node_index];
@@ -374,14 +390,12 @@ public:
     }
 
     // 查找树中是否有以 prefix 为前缀的单词
-    [[nodiscard]] bool contains_starts_with(std::string_view prefix) const noexcept {
-        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+    [[nodiscard]] bool contains_starts_with_impl(std::string_view prefix) const noexcept {
         return find_node_index(prefix) != invalid_index;
     }
 
     // 获取所有以 prefix 为前缀的单词，最多 limit 个
-    [[nodiscard]] std::vector<std::string> prefix_search(std::string_view prefix, SizeT limit = SizeMax) const {
-        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+    [[nodiscard]] std::vector<std::string> prefix_search_impl(std::string_view prefix, SizeT limit = SizeMax) const {
         UInt32 start_node_index = find_node_index(prefix);
         if (start_node_index == invalid_index) return {};
 
@@ -391,10 +405,18 @@ public:
         dfs(start_node_index, current_word, result, limit);
         return result;
     }
+
+public:
+    explicit SPmrFlatTries(std::pmr::memory_resource *resource) : node_pool(resource), memory_resource(resource) {
+        node_pool.reserve(1024);
+        create_node();
+    }
 };
 
-// 仅支持 ASCII 但更快的 Tries，用 FixedArray 作为每个节点存储孩子的数据结构
-class SPmrArrayTries {
+// 仅支持 ASCII 但更快的 Tries，用 FixedArray 作为每个节点存储孩子的数据结构，内存池只增不减，缓存命中率更高
+class SPmrArrayTries : public TriesBase<SPmrArrayTries> {
+    friend TriesBase<SPmrArrayTries>;
+
     static constexpr SizeT children_capacity = 256;
     static constexpr UInt32 invalid_index = std::numeric_limits<UInt32>::max();
 
@@ -406,8 +428,7 @@ class SPmrArrayTries {
     };
 
     std::pmr::vector<Node> node_pool;
-    // std::pmr::memory_resource *memory_resource; 暂时没用上
-    mutable std::shared_mutex shared_mutex;
+    std::pmr::memory_resource *memory_resource;
 
     static constexpr SizeT uchar_to_index(UChar uch) noexcept { return static_cast<SizeT>(uch); }
 
@@ -451,20 +472,8 @@ class SPmrArrayTries {
         return current_node_index;
     }
 
-public:
-    explicit SPmrArrayTries(std::pmr::memory_resource *resource) : node_pool(resource), shared_mutex() {
-        node_pool.reserve(1024);
-        create_node();
-    }
-
-    SPmrArrayTries(const SPmrArrayTries &) = delete;
-    SPmrArrayTries &operator=(const SPmrArrayTries &) = delete;
-    SPmrArrayTries(SPmrArrayTries &&) = delete;
-    SPmrArrayTries &operator=(SPmrArrayTries &&) = delete;
-
     // 添加新的单词
-    void push(std::string_view word) {
-        std::unique_lock<std::shared_mutex> write_lock(shared_mutex);
+    void push_impl(std::string_view word) {
         UInt32 current_node_index = 0;
         for (char ch : word) {
             UChar uch = CastUChar(ch);
@@ -482,16 +491,14 @@ public:
     }
 
     // 查找是否包含给定单词
-    [[nodiscard]] bool contains(std::string_view word) const noexcept {
-        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+    [[nodiscard]] bool contains_impl(std::string_view word) const noexcept {
         UInt32 node_index = find_node_index(word);
         return node_index != invalid_index && node_pool[node_index].is_end;
     }
 
-    bool erase(std::string_view word) {
-        std::unique_lock<std::shared_mutex> write_lock(shared_mutex);
+    bool erase_impl(std::string_view word) {
         UInt32 current_node_index = 0;
-        std::vector<std::pair<UInt32, SizeT>> path;
+        std::pmr::vector<std::pair<UInt32, SizeT>> path(memory_resource);
         path.reserve(word.size());
 
         for (char ch : word) {
@@ -523,14 +530,12 @@ public:
     }
 
     // 查找树中是否有以 prefix 为前缀的单词
-    [[nodiscard]] bool contains_starts_with(std::string_view prefix) const noexcept {
-        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+    [[nodiscard]] bool contains_starts_with_impl(std::string_view prefix) const noexcept {
         return find_node_index(prefix) != invalid_index;
     }
 
     // 获取所有以 prefix 为前缀的单词，最多 limit 个
-    [[nodiscard]] std::vector<std::string> prefix_search(std::string_view prefix, SizeT limit = SizeMax) {
-        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+    [[nodiscard]] std::vector<std::string> prefix_search_impl(std::string_view prefix, SizeT limit = SizeMax) {
         UInt32 start_node_index = find_node_index(prefix);
         if (start_node_index == invalid_index) return {};
 
@@ -540,10 +545,18 @@ public:
         dfs(start_node_index, current_word, result, limit);
         return result;
     }
+
+public:
+    explicit SPmrArrayTries(std::pmr::memory_resource *resource) : node_pool(resource), memory_resource(resource) {
+        node_pool.reserve(1024);
+        create_node();
+    }
 };
 
-// 优化：可以重复利用死亡节点
-class SPmrCompactTries {
+// 使用 FreeList 复用死亡节点，但是缓存命中率会下降
+class SPmrArrayTriesFL : public TriesBase<SPmrArrayTriesFL> {
+    friend class TriesBase<SPmrArrayTriesFL>;
+
     static constexpr SizeT children_capacity = 256;
     static constexpr UInt32 invalid_index = std::numeric_limits<UInt32>::max();
 
@@ -561,7 +574,7 @@ class SPmrCompactTries {
 
     std::pmr::vector<Node> node_pool;
     std::pmr::vector<UInt32> free_node_indices; // free list for reusable node indices
-    mutable std::shared_mutex shared_mutex;
+    std::pmr::memory_resource *memory_resource;
 
     static constexpr SizeT uchar_to_index(UChar uch) noexcept { return static_cast<SizeT>(uch); }
 
@@ -611,21 +624,8 @@ class SPmrCompactTries {
         return current_node_index;
     }
 
-public:
-    explicit SPmrCompactTries(std::pmr::memory_resource *resource)
-        : node_pool(resource), free_node_indices(resource), shared_mutex() {
-        node_pool.reserve(1024);
-        create_node();
-    }
-
-    SPmrCompactTries(const SPmrCompactTries &) = delete;
-    SPmrCompactTries &operator=(const SPmrCompactTries &) = delete;
-    SPmrCompactTries(SPmrCompactTries &&) = delete;
-    SPmrCompactTries &operator=(SPmrCompactTries &&) = delete;
-
     // 添加新的单词
-    void push(std::string_view word) {
-        std::unique_lock<std::shared_mutex> write_lock(shared_mutex);
+    void push_impl(std::string_view word) {
         UInt32 current_node_index = 0;
         for (char ch : word) {
             UChar uch = CastUChar(ch);
@@ -642,17 +642,15 @@ public:
     }
 
     // 查找是否包含给定单词
-    [[nodiscard]] bool contains(std::string_view word) const noexcept {
-        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+    [[nodiscard]] bool contains_impl(std::string_view word) const noexcept {
         UInt32 node_index = find_node_index(word);
         return node_index != invalid_index && node_pool[node_index].is_end;
     }
 
     // 移除给定单词，返回移除是否成功
-    bool erase(std::string_view word) {
-        std::unique_lock<std::shared_mutex> write_lock(shared_mutex);
+    bool erase_impl(std::string_view word) {
         UInt32 current_node_index = 0;
-        std::vector<std::pair<UInt32, SizeT>> path;
+        std::pmr::vector<std::pair<UInt32, SizeT>> path(memory_resource);
         path.reserve(word.size());
 
         for (char ch : word) {
@@ -668,6 +666,7 @@ public:
         Node &terminal_node = node_pool[current_node_index];
         if (!terminal_node.is_end) return false;
         terminal_node.is_end = false;
+        if (terminal_node.active_count > 0) return true;
 
         for (auto it = path.rbegin(); it != path.rend(); ++it) {
             UInt32 parent_index = it->first;
@@ -685,14 +684,12 @@ public:
     }
 
     // 查找树中是否有以 prefix 为前缀的单词
-    [[nodiscard]] bool contains_starts_with(std::string_view prefix) const noexcept {
-        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+    [[nodiscard]] bool contains_starts_with_impl(std::string_view prefix) const noexcept {
         return find_node_index(prefix) != invalid_index;
     }
 
     // 获取所有以 prefix 为前缀的单词，最多 limit 个
-    [[nodiscard]] std::vector<std::string> prefix_search(std::string_view prefix, SizeT limit = SizeMax) const {
-        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+    [[nodiscard]] std::vector<std::string> prefix_search_impl(std::string_view prefix, SizeT limit = SizeMax) const {
         UInt32 start_node_index = find_node_index(prefix);
         if (start_node_index == invalid_index) return {};
 
@@ -701,5 +698,12 @@ public:
         std::string current_word(prefix);
         dfs(start_node_index, current_word, result, limit);
         return result;
+    }
+
+public:
+    explicit SPmrArrayTriesFL(std::pmr::memory_resource *resource)
+        : node_pool(resource), free_node_indices(resource), memory_resource(resource) {
+        node_pool.reserve(1024);
+        create_node();
     }
 };
