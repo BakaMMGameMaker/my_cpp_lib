@@ -1,9 +1,9 @@
 #pragma once
 #include "salias.h"
 #include "sutils.hpp"
+#include <algorithm>
 #include <array>
 #include <concepts>
-#include <cstddef>
 #include <limits>
 #include <map>
 #include <memory>
@@ -39,14 +39,14 @@ concept TriesChildrenStorage =
         } -> std::same_as<void>;
     };
 
-// 通用的孩子存储策略：稠密数组
-template <typename IndexType, SizeT Capacity> struct DenseArrayChildren {
+// 仅用 array<Capacity> 来存储孩子节点，性能较高，但内存开销较大
+template <typename IndexType, SizeT Capacity> struct FixedChildren {
     static constexpr IndexType invalid_index = std::numeric_limits<IndexType>::max();
 
     std::array<IndexType, Capacity> children;
     SizeT active_count; // 活跃的孩子个数
 
-    DenseArrayChildren() : children(), active_count(0) { children.fill(invalid_index); }
+    FixedChildren() : children(), active_count(0) { children.fill(invalid_index); }
 
     [[nodiscard]] IndexType get(UChar key) const noexcept { return children[CastSizeT(key)]; }
 
@@ -54,7 +54,7 @@ template <typename IndexType, SizeT Capacity> struct DenseArrayChildren {
         IndexType &ref = children[CastSizeT(key)];
         if (ref == invalid_index) {
             if (index == invalid_index) return;
-            ++active_count; // ref = invalid index and index != invalid index
+            active_count++; // ref = invalid index and index != invalid index
         } else {
             if (index == invalid_index) --active_count; // ref != invalid index and index == invalid index
         }
@@ -80,11 +80,9 @@ template <typename IndexType, SizeT Capacity> struct DenseArrayChildren {
     }
 };
 
-// 通用的孩子存储策略：混合版本
-// children 数量较少的时候使用小数组存 (key, index)，达到 Threshold 后切换为稠密数组
-// 可以自由设定是否允许孩子数重新 <= Threshold 时切换回稀疏数组
+// 子节点数量少时，用 array<Threshold> 来存储节点，可以在子节点数量少时避免 Capacity 次循环，性能较高，但内存开销更大
 template <typename IndexType, SizeT Capacity, SizeT Threshold, bool AllowShrinkToSparse = false>
-struct HybridArrayChildren {
+struct HybridFixedChildren {
     static constexpr IndexType invalid_index = std::numeric_limits<IndexType>::max();
 
     struct Entry {
@@ -92,13 +90,13 @@ struct HybridArrayChildren {
         IndexType index; // 在节点池内的索引
     };
 
-    std::array<Entry, Threshold> entries{}; // 还未到达阈值时
-    bool using_dense = false;               // 是否正在使用稠密数组
+    std::array<Entry, Threshold> entries; // 还未到达阈值时
+    bool using_dense;                     // 是否正在使用稠密数组
 
-    std::array<IndexType, Capacity> dense{}; // 到达阈值后使用的稠密数组
-    SizeT active_count = 0;                  // 活跃的孩子个数
+    std::array<IndexType, Capacity> dense; // 到达阈值后使用的稠密数组
+    SizeT active_count;                    // 活跃的孩子个数
 
-    HybridArrayChildren() = default;
+    HybridFixedChildren() : entries(), dense(), using_dense(false), active_count(0) {}
 
     [[nodiscard]] IndexType get(UChar key) const noexcept {
         if (using_dense) return dense[CastSizeT(key)]; // 如果正在使用稠密数组，直接返回对应槽位存储值
@@ -114,25 +112,41 @@ struct HybridArrayChildren {
         else set_dense(key, index);
     }
 
-    void set_entry(UChar key, IndexType index) noexcept {
-        // 在 entries 中找到和指定 key 相同的条目，处理后返回
-        for (SizeT i = 0; i < active_count; ++i) {
-            if (entries[i].key != key) continue;
+    void reset() noexcept {
+        active_count = 0;
+        using_dense = false;
+        dense.fill(invalid_index);
+    }
 
-            // 传入 invalid index，代表要删除条目
-            // 逻辑删除：用最后的条目覆盖当前条目
-            if (index == invalid_index) entries[i] = entries[--active_count]; // 前缀递减，因为索引从 0 开始
-            else entries[i].index = index;
+    void set_entry(UChar key, IndexType index) noexcept {
+        // 在有序 sparse 中找到 key 应该在的位置
+        SizeT pos = 0;
+        while (pos < active_count && entries[pos].key < key) pos++;
+
+        // case 1 找到相同的 key
+        if (pos < active_count && entries[pos].key == key) {
+            if (index == invalid_index) {
+                if (entries[pos].index == invalid_index) [[unlikely]]
+                    return;
+                // 删除：保持有序，左侧整体往左移动一格
+                for (SizeT j = pos + 1; j < active_count; ++j) { entries[j - 1] = entries[j]; }
+                active_count--;
+            } else {
+                entries[pos].index = index;
+            }
             return;
         }
 
-        // 没有在 entries 中找到匹配的条目
+        // case 2 不存在 key 且试图删除
+        if (index == invalid_index) return;
 
-        if (index == invalid_index) return; // 删除不存在的条目
+        // case 3 插入新的 key
 
         if (active_count < Threshold) {
-            entries[active_count].key = key;
-            entries[active_count].index = index;
+            // 在 pos 位置插入，右侧整体往右移动一格
+            for (SizeT j = active_count; j > pos; --j) { entries[j] = entries[j - 1]; }
+            entries[pos].key = key;
+            entries[pos].index = index;
             active_count++;
             return;
         }
@@ -190,9 +204,158 @@ struct HybridArrayChildren {
         if (!using_dense) {
             for (SizeT i = 0; i < active_count; ++i) {
                 const Entry &entry = entries[i];
+                if (entries[i].index == invalid_index) [[unlikely]] // 防御
+                    continue;
                 func(CastUChar(entry.key), entry.index);
             }
         } else {
+            for (SizeT key = 0; key < Capacity; ++key) {
+                IndexType index = dense[key];
+                if (index != invalid_index) func(CastUChar(key), index);
+            }
+        }
+    }
+};
+
+// 子节点数量少时使用 array<Threshold> 存储节点，仅在需要时扩展更多空间，内存友好，性能较高
+template <typename IndexType, SizeT Capacity, SizeT Threshold, bool AllowShrinkToSparse = false>
+struct HybridHeapChildren {
+    static constexpr IndexType invalid_index = std::numeric_limits<IndexType>::max();
+
+    struct Entry {
+        UChar key;
+        IndexType index;
+    };
+
+    std::array<Entry, Threshold> entries;
+    std::unique_ptr<IndexType[]> dense; // nullptr 表示尚未分配
+    bool using_dense;
+    SizeT active_count;
+
+    HybridHeapChildren() : entries(), dense(nullptr), using_dense(false), active_count(0) {}
+
+    [[nodiscard]] IndexType get(UChar key) const noexcept {
+        if (using_dense) {
+            if (dense == nullptr) [[unlikely]]
+                return invalid_index;
+            return dense[CastSizeT(key)];
+        }
+
+        for (SizeT i = 0; i < active_count; ++i) {
+            if (entries[i].key == key) return entries[i].index;
+        }
+        return invalid_index;
+    }
+
+    void set(UChar key, IndexType index) {
+        if (!using_dense) set_entry(key, index);
+        else set_dense(key, index);
+    }
+
+    void reset() noexcept {
+        active_count = 0;
+        using_dense = false;
+        dense.reset(); // 把内存空间还给系统
+    }
+
+    void ensure_dense_allocated() {
+        if (dense != nullptr) return;
+        dense = std::make_unique<IndexType[]>(Capacity);
+        for (SizeT i = 0; i < Capacity; ++i) dense[i] = invalid_index;
+    }
+
+    void set_entry(UChar key, IndexType index) {
+        SizeT pos = 0;
+        while (pos < active_count && entries[pos].key < key) pos++;
+
+        if (pos < active_count && entries[pos].key == key) {
+            if (index == invalid_index) {
+                if (entries.index == invalid_index) [[unlikely]]
+                    return;
+                for (SizeT j = pos + 1; j < active_count; ++j) { entries[j - 1] = entries[j]; }
+                active_count--;
+            } else {
+                entries[pos].index = index;
+            }
+            return;
+        }
+
+        if (index == invalid_index) return;
+
+        if (active_count < Threshold) {
+            for (SizeT j = active_count; j > pos; --j) { entries[j] = entries[j - 1]; }
+            entries[pos].key = key;
+            entries[pos].index = index;
+            active_count++;
+            return;
+        }
+
+        switch_to_dense();
+        set_dense(key, index);
+    }
+
+    void set_dense(UChar key, IndexType index) {
+        ensure_dense_allocated();
+        IndexType &ref = dense[CastSizeT(key)];
+        if (ref == invalid_index) {
+            if (index == invalid_index) return;
+            active_count++;
+        } else {
+            if (index == invalid_index) active_count--;
+        }
+        ref = index;
+
+        if constexpr (AllowShrinkToSparse) {
+            if (using_dense && active_count <= Threshold) switch_to_sparse();
+        }
+    }
+
+    void switch_to_dense() {
+        ensure_dense_allocated();
+        for (SizeT i = 0; i < active_count; ++i) {
+            const Entry &entry = entries[i];
+            dense[CastSizeT(entry.key)] = entry.index;
+        }
+        using_dense = true;
+    }
+
+    void switch_to_sparse() {
+        if (dense == nullptr) [[unlikely]] {
+            using_dense = false;
+            active_count = 0;
+            return;
+        }
+
+        SizeT count = 0;
+        for (SizeT key = 0; key < Capacity; ++key) {
+            IndexType index = dense[key];
+            if (index == invalid_index) continue;
+            entries[count].key = CastUChar(key);
+            entries[count].index = index;
+            count++;
+        }
+        active_count = count;
+        using_dense = false;
+        dense.reset(); // 回收内存空间
+    }
+
+    [[nodiscard]] SizeT size() const noexcept { return active_count; }
+    [[nodiscard]] bool empty() const noexcept { return active_count == 0; }
+
+    template <typename Func>
+        requires ForEachChildCallable<Func, IndexType>
+    void for_each_child(Func &&func) const {
+        if (active_count == 0) return;
+        if (!using_dense) {
+            for (SizeT i = 0; i < active_count; ++i) {
+                const Entry &entry = entries[i];
+                if (entry.index == invalid_index) [[unlikely]]
+                    continue;
+                func(CastUChar(entry.key), entry.index);
+            }
+        } else {
+            if (dense == nullptr) [[unlikely]]
+                return;
             for (SizeT key = 0; key < Capacity; ++key) {
                 IndexType index = dense[key];
                 if (index != invalid_index) func(CastUChar(key), index);
@@ -208,21 +371,16 @@ template <typename IndexType> struct TriesFreeList<IndexType, false> {
     explicit TriesFreeList(std::pmr::memory_resource *) noexcept {}
 
     [[nodiscard]] bool empty() const noexcept { return true; }
-
     void push(IndexType) noexcept {}
-
     [[nodiscard]] IndexType pop() noexcept { return {}; }
 };
 
 template <typename IndexType> struct TriesFreeList<IndexType, true> {
     std::pmr::vector<IndexType> indices;
-
     explicit TriesFreeList(std::pmr::memory_resource *resource) : indices(resource) {}
 
     [[nodiscard]] bool empty() const noexcept { return indices.empty(); }
-
     void push(IndexType index) { indices.push_back(index); }
-
     [[nodiscard]] IndexType pop() {
         IndexType index = indices.back();
         indices.pop_back();
@@ -354,7 +512,9 @@ class STries : public TriesBase<STries> {
             Node *parent = it->first;
             char edge = it->second;
             auto child_it = parent->children.find(edge);
-            if (child_it == parent->children.end()) break;
+            if (child_it == parent->children.end()) [[unlikely]]
+                break;
+
             const Node *child = child_it->second.get();
             if (child->is_end || !child->children.empty()) break; // 不作为某单词的结尾，也不属于任何单词的前缀部分
             parent->children.erase(child_it);
@@ -468,7 +628,9 @@ class SFlatTries : public TriesBase<SFlatTries> {
             char edge = it->second;
             Node &parent_node = node_pool[parent_index];
             auto child_it = parent_node.children.find(edge);
-            if (child_it == parent_node.children.end()) break;
+            if (child_it == parent_node.children.end()) [[unlikely]]
+                break;
+
             UInt32 child_node_index = child_it->second;
             const Node &child_node = node_pool[child_node_index];
             if (child_node.is_end || !child_node.children.empty()) break;
@@ -589,7 +751,9 @@ class SPmrFlatTries : public TriesBase<SPmrFlatTries> {
             char edge = it->second;
             Node &parent_node = node_pool[parent_index];
             auto child_it = parent_node.children.find(edge);
-            if (child_it == parent_node.children.end()) break;
+            if (child_it == parent_node.children.end()) [[unlikely]]
+                break;
+
             UInt32 child_node_index = child_it->second;
             const Node &child_node = node_pool[child_node_index];
             if (child_node.is_end || !child_node.children.empty()) break;
@@ -731,7 +895,9 @@ class SPmrArrayTries : public TriesBase<SPmrArrayTries<ChildrenStorageType, Reus
             UChar child_key = it->second;
             Node &parent_node = node_pool[parent_node_index];
             IndexType child_node_index = parent_node.children.get(child_key);
-            if (child_node_index == invalid_index) break;
+            if (child_node_index == invalid_index) [[unlikely]]
+                break;
+
             const Node &child_node = node_pool[child_node_index];
             if (child_node.is_end || !child_node.children.empty()) break;
             parent_node.children.set(child_key, invalid_index);
