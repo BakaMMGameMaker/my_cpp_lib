@@ -142,7 +142,7 @@ class SFlatTries {
     void dfs(UInt32 node_index, std::string &current_word, std::vector<std::string> &result,
              SizeT limit) const noexcept {
         if (result.size() >= limit) return;
-        const auto &current_node = node_pool[node_index];
+        const Node &current_node = node_pool[node_index];
         if (current_node.is_end) result.push_back(current_word);
         if (result.size() >= limit) return;
         for (const auto &[ch, child_index] : current_node.children) {
@@ -157,7 +157,7 @@ class SFlatTries {
     [[nodiscard]] UInt32 find_node_index(std::string_view prefix) const noexcept {
         UInt32 current_node_index = 0; // root
         for (char ch : prefix) {
-            const auto &current_node = node_pool[current_node_index];
+            const Node &current_node = node_pool[current_node_index];
             auto it = current_node.children.find(ch);
             if (it == current_node.children.end()) return invalid_index;
             current_node_index = it->second;
@@ -183,7 +183,7 @@ public:
             // 这里不应该使用引用，即便是单线程，create node 也会导致悬空引用
             auto it = node_pool[current_node_index].children.find(ch);
             if (it == node_pool[current_node_index].children.end()) {
-                auto new_child_index = create_node(); // 此处可能导致 reallocate
+                UInt32 new_child_index = create_node(); // 此处可能导致 reallocate
                 node_pool[current_node_index].children.try_emplace(ch, new_child_index);
                 current_node_index = new_child_index;
             } else {
@@ -196,7 +196,7 @@ public:
     // 查找是否包含给定单词
     [[nodiscard]] bool contains(std::string_view word) const noexcept {
         std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
-        auto node_index = find_node_index(word);
+        UInt32 node_index = find_node_index(word);
         return node_index != invalid_index && node_pool[node_index].is_end;
     }
 
@@ -206,25 +206,25 @@ public:
         std::vector<std::pair<UInt32, char>> path;
         path.reserve(word.size());
         for (char ch : word) {
-            auto &current_node = node_pool[current_node_index];
+            Node &current_node = node_pool[current_node_index];
             auto it = current_node.children.find(ch);
             if (it == current_node.children.end()) return false;
             path.emplace_back(current_node_index, ch);
             current_node_index = it->second;
         }
 
-        auto &terminal_node = node_pool[current_node_index];
+        Node &terminal_node = node_pool[current_node_index];
         if (!terminal_node.is_end) return false;
         terminal_node.is_end = false;
 
         for (auto it = path.rbegin(); it != path.rend(); ++it) {
-            auto parent_index = it->first;
+            UInt32 parent_index = it->first;
             char edge = it->second;
-            auto &parent_node = node_pool[parent_index];
+            Node &parent_node = node_pool[parent_index];
             auto child_it = parent_node.children.find(edge);
             if (child_it == parent_node.children.end()) break;
-            auto child_index = child_it->second;
-            const auto &child_node = node_pool[child_index];
+            UInt32 child_index = child_it->second;
+            const Node &child_node = node_pool[child_index];
             if (child_node.is_end || !child_node.children.empty()) break;
             parent_node.children.erase(child_it);
         }
@@ -272,7 +272,7 @@ class SPmrFlatTries {
     void dfs(UInt32 node_index, std::string &current_word, std::vector<std::string> &result,
              SizeT limit) const noexcept {
         if (result.size() >= limit) return;
-        const auto &current_node = node_pool[node_index];
+        const Node &current_node = node_pool[node_index];
         if (current_node.is_end) result.push_back(current_word);
         if (result.size() >= limit) return;
 
@@ -287,7 +287,7 @@ class SPmrFlatTries {
     [[nodiscard]] UInt32 find_node_index(std::string_view prefix) const noexcept {
         UInt32 current_node_index = 0; // root
         for (char ch : prefix) {
-            const auto &current_node = node_pool[current_node_index];
+            const Node &current_node = node_pool[current_node_index];
             auto it = current_node.children.find(ch);
             if (it == current_node.children.end()) return invalid_index;
             current_node_index = it->second;
@@ -315,7 +315,7 @@ public:
             // 这里不应该使用引用，即便是单线程，create node 也会导致悬空引用
             auto it = node_pool[current_node_index].children.find(ch);
             if (it == node_pool[current_node_index].children.end()) {
-                auto new_child_index = create_node();
+                UInt32 new_child_index = create_node();
                 node_pool[current_node_index].children.try_emplace(ch, new_child_index);
                 current_node_index = new_child_index;
             } else {
@@ -328,7 +328,7 @@ public:
     // 查找是否包含给定的单词
     [[nodiscard]] bool contains(std::string_view word) const noexcept {
         std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
-        auto node_index = find_node_index(word);
+        UInt32 node_index = find_node_index(word);
         return node_index != invalid_index && node_pool[node_index].is_end;
     }
 
@@ -339,25 +339,25 @@ public:
         std::vector<std::pair<UInt32, char>> path;
         path.reserve(word.size());
         for (char ch : word) {
-            auto &current_node = node_pool[current_node_index];
+            Node &current_node = node_pool[current_node_index];
             auto it = current_node.children.find(ch);
             if (it == current_node.children.end()) return false;
             path.emplace_back(current_node_index, ch);
             current_node_index = it->second;
         }
 
-        auto &terminal_node = node_pool[current_node_index];
+        Node &terminal_node = node_pool[current_node_index];
         if (!terminal_node.is_end) return false;
         terminal_node.is_end = false;
 
         for (auto it = path.rbegin(); it != path.rend(); ++it) {
-            auto parent_index = it->first;
+            UInt32 parent_index = it->first;
             char edge = it->second;
-            auto &parent_node = node_pool[parent_index];
+            Node &parent_node = node_pool[parent_index];
             auto child_it = parent_node.children.find(edge);
             if (child_it == parent_node.children.end()) break;
-            auto child_index = child_it->second;
-            const auto &child_node = node_pool[child_index];
+            UInt32 child_index = child_it->second;
+            const Node &child_node = node_pool[child_index];
             if (child_node.is_end || !child_node.children.empty()) break;
             parent_node.children.erase(child_it);
         }
@@ -391,8 +391,9 @@ class SPmrArrayTries {
 
     struct Node {
         std::array<UInt32, children_capacity> children;
-        bool is_end = false;
-        Node() noexcept : children(), is_end(false) { children.fill(std::numeric_limits<UInt32>::max()); }
+        SizeT active_count; // 活跃的孩子数，用于 O1 判断 has children
+        bool is_end;
+        Node() noexcept : children(), active_count(0), is_end(false) { children.fill(invalid_index); }
     };
 
     std::pmr::vector<Node> node_pool;
@@ -409,12 +410,12 @@ class SPmrArrayTries {
     void dfs(UInt32 node_index, std::string &current_word, std::vector<std::string> &result,
              SizeT limit) const noexcept {
         if (result.size() >= limit) return;
-        const auto &node = node_pool[node_index];
+        const Node &node = node_pool[node_index];
         if (node.is_end) {
             result.push_back(current_word);
             if (result.size() >= limit) return;
         }
-
+        if (node.active_count == 0) return; // 避免空转 256
         for (SizeT child_slot = 0; child_slot < children_capacity; ++child_slot) {
             UInt32 child_index = node.children[child_slot];
             if (child_index == invalid_index) continue;
@@ -430,7 +431,7 @@ class SPmrArrayTries {
     [[nodiscard]] UInt32 find_node_index(std::string_view prefix) const noexcept {
         UInt32 current_node_index = 0;
         for (char ch : prefix) {
-            auto uch = static_cast<UChar>(ch);
+            UChar uch = static_cast<UChar>(ch);
             const Node &current_node = node_pool[current_node_index];
             SizeT child_slot = uchar_to_index(uch);
             UInt32 child_index = current_node.children[child_slot];
@@ -441,7 +442,7 @@ class SPmrArrayTries {
     }
 
     [[nodiscard]] bool has_children(UInt32 node_index) const noexcept {
-        const auto &node = node_pool[node_index];
+        const Node &node = node_pool[node_index];
         for (UInt32 child_index : node.children) {
             if (child_index != invalid_index) return true; // 有非 invalid index 说明有 index 指向 pool 中节点
         }
@@ -464,7 +465,7 @@ public:
         std::unique_lock<std::shared_mutex> write_lock(shared_mutex);
         UInt32 current_node_index = 0;
         for (char ch : word) {
-            auto uch = static_cast<UChar>(ch);
+            UChar uch = static_cast<UChar>(ch);
             // 不要使用引用，create node 会导致 reallocation
             SizeT child_slot = uchar_to_index(uch);
             UInt32 child_index = node_pool[current_node_index].children[child_slot];
@@ -491,8 +492,8 @@ public:
         path.reserve(word.size());
 
         for (char ch : word) {
-            auto uch = static_cast<UChar>(ch);
-            auto &current_node = node_pool[current_node_index];
+            UChar uch = static_cast<UChar>(ch);
+            Node &current_node = node_pool[current_node_index];
             SizeT child_slot = uchar_to_index(uch);
             UInt32 child_index = current_node.children[child_slot];
             if (child_index == invalid_index) return false;
@@ -500,18 +501,18 @@ public:
             current_node_index = child_index;
         }
 
-        auto &terminal_node = node_pool[current_node_index];
+        Node &terminal_node = node_pool[current_node_index];
         if (!terminal_node.is_end) return false;
         terminal_node.is_end = false;
 
         for (auto it = path.rbegin(); it != path.rend(); ++it) {
             UInt32 parent_index = it->first;
             SizeT child_slot = it->second;
-            auto &parent_node = node_pool[parent_index];
+            Node &parent_node = node_pool[parent_index];
             UInt32 child_index = parent_node.children[child_slot];
             if (child_index == invalid_index) break;
-            const auto &child_node = node_pool[child_index];
-            if (child_node.is_end || !has_children(child_index)) break;
+            const Node &child_node = node_pool[child_index];
+            if (child_node.is_end || has_children(child_index)) break;
             parent_node.children[child_slot] = invalid_index;
         }
         return true;
