@@ -1,7 +1,6 @@
 #pragma once
 #include "salias.h"
 #include "sutils.hpp"
-#include <algorithm>
 #include <array>
 #include <concepts>
 #include <limits>
@@ -20,12 +19,6 @@ concept ForEachChildCallable = requires(Func &&func, UChar key, IndexType index)
     { std::forward<Func>(func)(key, index) }; // 没有 forward 就只能保证 func 为左值时可以被调用
 };
 
-// ChildrenStorageType 概念约束：
-// - get(SizeT) -> IndexType
-// - set(SizeT, IndexType) -> void
-// - empty() -> bool
-// - size() -> SizeT
-// - for_each_child(Func) -> void
 template <typename ChildrenStorageType>
 concept TriesChildrenStorage =
     requires(ChildrenStorageType storage, const ChildrenStorageType const_storage, UChar key, UInt32 index) {
@@ -47,6 +40,10 @@ template <typename IndexType, SizeT Capacity> struct FixedChildren {
     SizeT active_count; // 活跃的孩子个数
 
     FixedChildren() : children(), active_count(0) { children.fill(invalid_index); }
+    FixedChildren(const FixedChildren &) = delete;
+    FixedChildren(FixedChildren &&) = default;
+    FixedChildren &operator=(const FixedChildren &) = delete;
+    FixedChildren &operator=(FixedChildren &&) noexcept = default;
 
     [[nodiscard]] IndexType get(UChar key) const noexcept { return children[CastSizeT(key)]; }
 
@@ -96,7 +93,14 @@ struct HybridFixedChildren {
     std::array<IndexType, Capacity> dense; // 到达阈值后使用的稠密数组
     SizeT active_count;                    // 活跃的孩子个数
 
-    HybridFixedChildren() : entries(), dense(), using_dense(false), active_count(0) {}
+    HybridFixedChildren() : entries(), dense(), using_dense(false), active_count(0) {
+        for (auto &e : entries) { e.index = invalid_index; }
+        dense.std::fill(invalid_index);
+    }
+    HybridFixedChildren(const HybridFixedChildren &) = delete;
+    HybridFixedChildren(HybridFixedChildren &&) = default;
+    HybridFixedChildren &operator=(const HybridFixedChildren &) = delete;
+    HybridFixedChildren &operator=(HybridFixedChildren &&) = default;
 
     [[nodiscard]] IndexType get(UChar key) const noexcept {
         if (using_dense) return dense[CastSizeT(key)]; // 如果正在使用稠密数组，直接返回对应槽位存储值
@@ -232,7 +236,13 @@ struct HybridHeapChildren {
     bool using_dense;
     SizeT active_count;
 
-    HybridHeapChildren() : entries(), dense(nullptr), using_dense(false), active_count(0) {}
+    HybridHeapChildren() : entries(), dense(nullptr), using_dense(false), active_count(0) {
+        for (auto &e : entries) { e.index = invalid_index; }
+    }
+    HybridHeapChildren(const HybridHeapChildren &) = delete;
+    HybridHeapChildren(HybridHeapChildren &&) = default;
+    HybridHeapChildren &operator=(const HybridHeapChildren &) = delete;
+    HybridHeapChildren &operator=(HybridHeapChildren &&) = default;
 
     [[nodiscard]] IndexType get(UChar key) const noexcept {
         if (using_dense) {
@@ -270,7 +280,7 @@ struct HybridHeapChildren {
 
         if (pos < active_count && entries[pos].key == key) {
             if (index == invalid_index) {
-                if (entries.index == invalid_index) [[unlikely]]
+                if (entries[pos].index == invalid_index) [[unlikely]]
                     return;
                 for (SizeT j = pos + 1; j < active_count; ++j) { entries[j - 1] = entries[j]; }
                 active_count--;
@@ -574,6 +584,8 @@ class SFlatTries : public TriesBase<SFlatTries> {
     }
 
     [[nodiscard]] UInt32 find_node_index(std::string_view prefix) const noexcept {
+        if (node_pool.empty()) [[unlikely]]
+            return invalid_index;
         UInt32 current_node_index = 0; // root
         for (char ch : prefix) {
             const Node &current_node = node_pool[current_node_index];
@@ -698,6 +710,8 @@ class SPmrFlatTries : public TriesBase<SPmrFlatTries> {
     }
 
     [[nodiscard]] UInt32 find_node_index(std::string_view prefix) const noexcept {
+        if (node_pool.empty()) [[unlikely]]
+            return invalid_index;
         UInt32 current_node_index = 0; // root
         for (char ch : prefix) {
             const Node &current_node = node_pool[current_node_index];
@@ -840,6 +854,8 @@ class SPmrArrayTries : public TriesBase<SPmrArrayTries<ChildrenStorageType, Reus
     }
 
     [[nodiscard]] IndexType find_node_index(std::string_view prefix) const noexcept {
+        if (node_pool.empty()) [[unlikely]]
+            return invalid_index;
         IndexType current_node_index = 0;
         for (char ch : prefix) {
             UChar key = CastUChar(ch);
