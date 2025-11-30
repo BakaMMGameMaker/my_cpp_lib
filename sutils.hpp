@@ -1,5 +1,6 @@
 #pragma once
 #include "salias.h"
+#include <climits>
 #include <concepts>
 #include <cstddef>
 #include <iterator>
@@ -30,6 +31,25 @@ constexpr int SafeCastInt(T value) {
     return static_cast<int>(value);
 }
 
+template <typename T>
+    requires std::convertible_to<T, UChar>
+constexpr UChar CastUChar(T value) noexcept {
+    return static_cast<UChar>(value);
+}
+
+template <typename T>
+    requires std::convertible_to<T, UChar>
+constexpr UChar SafeCastUChar(T value) {
+    if constexpr (std::floating_point<T>) {
+        if (value != static_cast<T>(static_cast<UChar>(value)))
+            throw std::overflow_error("SafeCastUChar: value cannot be represented exactly as unsigned char");
+        if (value < 0.0 || value > static_cast<T>(UCHAR_MAX))
+            throw std::overflow_error("SafeCastUChar: value out of unsigned char range");
+    } else {
+        if (!std::in_range<UChar>(value)) throw std::overflow_error("SafeCastUChar: value out of unsigned char range");
+    }
+    return static_cast<UChar>(value);
+}
 template <typename T>
     requires std::convertible_to<T, std::size_t>
 constexpr std::size_t CastSizeT(T value) noexcept {
