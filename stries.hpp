@@ -69,14 +69,16 @@ template <typename IndexType, SizeT Capacity> struct DenseArrayChildren {
         if (active_count == 0) return;
         for (SizeT key = 0; key < Capacity; ++key) {
             IndexType index = children[key];
-            if (index != invalid_index) func(key, index);
+            if (index != invalid_index) func(CastUChar(key), index);
         }
     }
 };
 
 // 通用的孩子存储策略：混合版本
 // children 数量较少的时候使用小数组存 (key, index)，达到 Threshold 后切换为稠密数组
-template <typename IndexType, SizeT Capacity, SizeT Threshold> struct HybridArrayChildren {
+// 可以自由设定是否允许孩子数重新 <= Threshold 时切换回稀疏数组
+template <typename IndexType, SizeT Capacity, SizeT Threshold, bool AllowShrinkToSparse = false>
+struct HybridArrayChildren {
     static constexpr IndexType invalid_index = std::numeric_limits<IndexType>::max();
 
     struct Entry {
@@ -144,6 +146,10 @@ template <typename IndexType, SizeT Capacity, SizeT Threshold> struct HybridArra
             if (index == invalid_index) active_count--; // ref != invalid index and index == invalid index
         }
         ref = index;
+
+        if constexpr (AllowShrinkToSparse) {
+            if (using_dense && active_count <= Threshold) switch_to_sparse();
+        }
     }
 
     void switch_to_dense() noexcept {
@@ -153,6 +159,19 @@ template <typename IndexType, SizeT Capacity, SizeT Threshold> struct HybridArra
             dense[CastSizeT(entry.key)] = entry.index;
         }
         using_dense = true; // 切换到稠密数组模式
+    }
+
+    void switch_to_sparse() noexcept {
+        SizeT count = 0;
+        for (SizeT key = 0; key < Capacity; ++key) {
+            IndexType index = dense[key];
+            if (index == invalid_index) continue;
+            entries[count].key = CastUChar(key);
+            entries[count].index = index;
+            count++;
+        }
+        active_count = count;
+        using_dense = false;
     }
 
     [[nodiscard]] SizeT size() const noexcept { return active_count; }
@@ -165,12 +184,12 @@ template <typename IndexType, SizeT Capacity, SizeT Threshold> struct HybridArra
         if (!using_dense) {
             for (SizeT i = 0; i < active_count; ++i) {
                 const Entry &entry = entries[i];
-                func(static_cast<SizeT>(entry.key), entry.index);
+                func(CastUChar(entry.key), entry.index);
             }
         } else {
             for (SizeT key = 0; key < Capacity; ++key) {
                 IndexType index = dense[key];
-                if (index != invalid_index) func(key, index);
+                if (index != invalid_index) func(CastUChar(key), index);
             }
         }
     }
@@ -598,10 +617,10 @@ class SPmrArrayTries : public TriesBase<SPmrArrayTries<ChildrenStorageType>> {
         }
         if (node.children.empty()) return;
 
-        node.children.for_each_child([this, &current_word, &result, limit](SizeT slot, IndexType child_node_index) {
+        node.children.for_each_child([this, &current_word, &result, limit](UChar key, IndexType child_node_index) {
             if (child_node_index == invalid_index) return; // defense
             if (result.size() >= limit) return;
-            current_word.push_back(static_cast<char>(slot));
+            current_word.push_back(static_cast<char>(key));
             dfs(child_node_index, current_word, result, limit);
             current_word.pop_back();
         });
