@@ -1,6 +1,14 @@
 #pragma once
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <vector>
+
+using SizeT = std::size_t;
+using UChar = unsigned char;
+using UInt32 = std::uint32_t;
+constexpr SizeT SizeMax = std::numeric_limits<SizeT>::max();
 
 template <typename T> using Vec1D = std::vector<T>;
 template <typename T> using Vec2D = std::vector<std::vector<T>>;
