@@ -238,7 +238,7 @@ struct HybridDynamicChildren {
     };
 
     std::array<Entry, Threshold> entries;
-    std::unique_ptr<IndexType[]> dense; // nullptr 表示尚未分配
+    std::unique_ptr<IndexType[], DenseDeleter> dense; // nullptr 表示尚未分配
     SizeT active_count;
     bool using_dense;
 

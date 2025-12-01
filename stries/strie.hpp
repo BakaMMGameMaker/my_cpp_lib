@@ -4,10 +4,15 @@
 #include "stries_free_list.hpp"
 #include "sutils.hpp"
 #include <algorithm>
+#include <ios>
+#include <istream>
 #include <limits>
 #include <memory_resource>
+#include <mutex>
+#include <ostream>
 #include <queue>
 #include <shared_mutex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -18,6 +23,12 @@ template <typename R>
 concept PrefixSearchResult = requires(R r) {
     std::ranges::range<R>;                                    // R 有 begin 和 end，可被 for 遍历
     std::same_as<std::ranges::range_value_t<R>, std::string>; // 遍历 R 时得到的每一项类型都为 string
+};
+
+// 单词分数计算可调用对象概念约束
+template <typename F>
+concept ScoreFunc = requires(F f, std::string_view sv) {
+    { f(sv) } -> std::convertible_to<SizeT>;
 };
 
 // Tries 树概念约束
@@ -37,12 +48,6 @@ concept Tries = requires(T t, const T ct, std::string_view sv, SizeT limit) {
     { ct.longest_prefix_of(sv) } -> std::same_as<std::string_view>; // 最长前缀匹配结果
 };
 
-// 单词分数计算可调用对象概念约束
-template <typename F>
-concept ScoreFunc = requires(F f, std::string_view sv) {
-    { f(sv) } -> std::convertible_to<SizeT>;
-};
-
 /*
  * @brief 允许用户提供 memory resource ，指定节点中存储孩子的数据结构，是否复用内存池中死亡的节点
  * @tparam ChildrenStorageType 节点中存储孩子的数据结构
@@ -53,6 +58,8 @@ template <TriesChildrenStorage ChildrenStorageType, bool ReuseDeadNodes = false>
     using IndexType = UInt32;
 
     static constexpr IndexType invalid_index = std::numeric_limits<UInt32>::max();
+    static constexpr UInt32 k_magic = 0x53545249; // 文件头标识
+    static constexpr UInt32 k_version = 1;        // 版本号
 
     struct Node {
         ChildrenStorageType children;
@@ -67,6 +74,11 @@ template <TriesChildrenStorage ChildrenStorageType, bool ReuseDeadNodes = false>
         explicit Node(std::pmr::memory_resource *resource)
             requires std::is_constructible_v<ChildrenStorageType, std::pmr::memory_resource *>
             : children(resource), is_end(false) {}
+
+        void reset() noexcept {
+            children.reset();
+            is_end = false;
+        }
     };
 
     // TODO：deque 版本，但考虑到 deque 版本缓存比较不友好，暂时不考虑，更倾向于一次性 reserve 足够空间
@@ -96,12 +108,11 @@ public:
 private:
     // 创建新的节点
     IndexType create_node() {
-        if constexpr (ReuseDeadNodes) {                   // 如果打算复用死亡节点
-            if (!free_list.empty()) {                     // 如果空闲节点表不为空
+        if constexpr (ReuseDeadNodes) {                   // 要复用死亡节点
+            if (!free_list.empty()) {                     // 空闲节点列表不为空
                 IndexType reused_index = free_list.pop(); // 弹出末尾的空闲节点对应的索引
-                Node &node = node_pool[reused_index];     // 获取索引对应的空闲节点
-                node.children.reset();                    // 重置空闲节点孩子状态
-                node.is_end = false;                      // 重置空闲节点 is end 状态
+                Node &node = node_pool[reused_index];     // 获取对应的空闲节点
+                node.reset();                             // 重置空闲节点状态
                 return reused_index;                      // 返回空闲接待你对应的索引
             }
         }
@@ -176,10 +187,7 @@ private:
         return current_node_index;
     }
 
-public:
-    // 添加新的单词
-    void push(std::string_view word) {
-        std::unique_lock<std::shared_mutex> write_lock(shared_mutex);
+    void push_without_lock(std::string_view word) {
         IndexType current_node_index = 0;
         for (char ch : word) {
             UChar key = CastUChar(ch);
@@ -195,6 +203,20 @@ public:
         if (last_node.is_end) return; // 插入的单词已经存在
         last_node.is_end = true;
         word_count++;
+    }
+
+    void clear_without_lock() {
+        node_pool.clear();
+        if constexpr (ReuseDeadNodes) free_list.clear();
+        word_count = 0; // 清空单词计数
+        create_node();  // 重新创建根节点
+    }
+
+public:
+    // 添加新的单词
+    void push(std::string_view word) {
+        std::unique_lock<std::shared_mutex> write_lock(shared_mutex);
+        push_without_lock(word);
     }
 
     // 移除给定单词，返回移除是否成功
@@ -321,6 +343,81 @@ public:
         }
         if (!found) return {};
         return text.substr(0, last_match_pos);
+    }
+
+    void clear() noexcept {
+        std::unique_lock<std::shared_mutex> write_lock(shared_mutex);
+        clear_without_lock();
+    }
+
+    // 将 Trie 序列化到输出流
+    // [uint32 magic][uint32 version][uint64 word_count]
+    // 重复 word_count 次：[uint64 len][len 字节的字符数据（不含'\0'）]
+    void serialize(std::ostream &os) const {
+        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+
+        // 写入文件头
+        const UInt32 magic = k_magic;
+        const UInt32 version = k_version;
+        os.write(reinterpret_cast<const char *>(&magic), sizeof(magic));
+        os.write(reinterpret_cast<const char *>(&version), sizeof(version));
+
+        // 收集所有单词
+        std::vector<std::string> words;
+        words.reserve(word_count); // word count 是逻辑单词数量
+
+        std::string current_word;
+        current_word.reserve(32);
+
+        // 从根结点出发进行 dfs，收集所有的单词
+        if (!node_pool.empty()) dfs(0, current_word, words, SizeMax);
+
+        const UInt64 count = static_cast<UInt64>(words.size());
+        os.write(reinterpret_cast<const char *>(&count), sizeof(count));
+
+        // 写入每一个单词 [长度][字节数据]
+        for (const auto &word : words) {
+            const UInt64 len = static_cast<UInt64>(word.size());
+            os.write(reinterpret_cast<const char *>(&len), sizeof(len));
+            if (len != 0) os.write(word.data(), static_cast<std::streamsize>(len));
+        }
+
+        if (!os) throw std::runtime_error("STrie::serialize: write failure");
+    }
+
+    // 反序列化覆盖当前 Trie 内容
+    void deserialize(std::istream &is) {
+        std::unique_lock<std::shared_mutex> write_lock(shared_mutex);
+
+        // 读取并检查文件头
+        UInt32 magic = 0;
+        UInt32 version = 0;
+        is.read(reinterpret_cast<char *>(&magic), sizeof(magic));
+        is.read(reinterpret_cast<char *>(&version), sizeof(version));
+        if (!is) throw std::runtime_error("STrie::deserialize: failed to read header");
+        if (magic != k_magic) throw std::runtime_error("STrie::deserialize: invalid magic");
+        if (version != k_version) throw std::runtime_error("STrie::deserialize: unsupported version");
+
+        // 读取单词数量
+        UInt64 count = 0;
+        is.read(reinterpret_cast<char *>(&count), sizeof(count));
+        if (!is) throw std::runtime_error("STrie::deserialize: failed to read word count");
+
+        // 清空原内容，重建节点
+        clear_without_lock();
+
+        // 逐个读出单词并插入
+        std::string word;
+        for (UInt64 i = 0; i < count; ++i) {
+            UInt64 len = 0;
+            is.read(reinterpret_cast<char *>(&len), sizeof(len));
+            if (!is) throw std::runtime_error("STrie::deserialize: failed to read word length");
+            if (len == 0) continue;
+            word.resize(static_cast<SizeT>(len));
+            is.read(word.data(), static_cast<std::streamsize>(len));
+            if (!is) throw std::runtime_error("STrie::deserialize: failed to read word bytes");
+            push_without_lock(word);
+        }
     }
 
     explicit STrie(std::pmr::memory_resource *resource = std::pmr::get_default_resource(),

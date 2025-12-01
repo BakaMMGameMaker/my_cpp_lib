@@ -11,6 +11,7 @@ template <typename T> using Vec2D = std::vector<std::vector<T>>;
 using SizeT = std::size_t;
 using UChar = unsigned char;
 using UInt32 = std::uint32_t;
+using UInt64 = std::uint64_t;
 using Int1D = Vec1D<int>;
 using Int2D = Vec2D<int>;
 using UInt1D = Vec1D<size_t>;

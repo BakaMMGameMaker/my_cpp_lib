@@ -4,8 +4,11 @@
 #include "stries_children_storage.hpp"
 #include <algorithm>
 #include <cassert>
+#include <fstream>
 #include <iostream>
 #include <memory_resource>
+#include <ostream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -147,6 +150,20 @@ int main() {
         std::cout << "\n===== STries<HybridDynamicChildren, true> =====\n";
         STrieWithReuse trie(&mr, 128);
         run_basic_tests(trie);
+    }
+
+    {
+        STrieNoReuse trie(&mr, 128);
+        std::ofstream ofs("trie.bin", std::ios::binary);
+        if (!ofs) throw std::runtime_error("failed to open file for write");
+        trie.serialize(ofs);
+    }
+
+    {
+        std::ifstream ifs("trie.bin", std::ios::binary);
+        if (!ifs) throw std::runtime_error("failed to open file for read");
+        STrieNoReuse trie(&mr, 128);
+        trie.deserialize(ifs);
     }
 
     std::cout << "\nAll tests passed.\n";
