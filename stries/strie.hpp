@@ -59,6 +59,14 @@ template <TriesChildrenStorage ChildrenStorageType, bool ReuseDeadNodes = false>
         // 把 is end 压缩到 UInt32 的最高位上，免除 padding？
         // 没有必要，ChildrenStorageType 已经够大了，而且这么做会导致复杂性和可读性都更加恶劣
         bool is_end = false;
+
+        // emplace_back() 时被使用
+        Node() = default;
+
+        // emplace_back(memory_resource) 时被使用
+        explicit Node(std::pmr::memory_resource *resource)
+            requires std::is_constructible_v<ChildrenStorageType, std::pmr::memory_resource *>
+            : children(resource), is_end(false) {}
     };
 
     // TODO：deque 版本，但考虑到 deque 版本缓存比较不友好，暂时不考虑，更倾向于一次性 reserve 足够空间
@@ -97,7 +105,12 @@ private:
                 return reused_index;                      // 返回空闲接待你对应的索引
             }
         }
-        node_pool.emplace_back();                            // 在对象池创建一个新的节点
+
+        // 如果 ChildrenStorageType 有接收 memory_resource* 的构造函数，那么使用它
+        if constexpr (std::is_constructible_v<ChildrenStorageType, std::pmr::memory_resource *>)
+            node_pool.emplace_back(memory_resource);
+        else node_pool.emplace_back(); // 否则创建默认的节点
+
         return static_cast<IndexType>(node_pool.size() - 1); // 返回新节点的索引
     }
 
@@ -310,7 +323,8 @@ public:
         return text.substr(0, last_match_pos);
     }
 
-    explicit STrie(std::pmr::memory_resource *resource, SizeT initial_capacity = 1024)
+    explicit STrie(std::pmr::memory_resource *resource = std::pmr::get_default_resource(),
+                   SizeT initial_capacity = 1024)
         : node_pool(resource), free_list(resource), memory_resource(resource), word_count(0), shared_mutex() {
         node_pool.reserve(initial_capacity);
         create_node();

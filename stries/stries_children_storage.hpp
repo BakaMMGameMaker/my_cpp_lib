@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <array>
 #include <memory>
+#include <memory_resource>
+#include <vcruntime_new.h>
 
 // ForEachChildCallable 概念约束：需要能以 (SizeT, IndexType) 的形式被调用
 template <typename Func, typename IndexType>
@@ -225,14 +227,29 @@ struct HybridDynamicChildren {
         IndexType index;
     };
 
+    // 自定义 deleter
+    struct DenseDeleter {
+        std::pmr::memory_resource *resource{}; // nullptr 表示不用 pmr，走普通堆
+        void operator()(IndexType *ptr) const noexcept {
+            if (!ptr) return;
+            if (resource) resource->deallocate(ptr, sizeof(IndexType) * Capacity, alignof(IndexType));
+            else ::operator delete[](ptr);
+        }
+    };
+
     std::array<Entry, Threshold> entries;
     std::unique_ptr<IndexType[]> dense; // nullptr 表示尚未分配
     SizeT active_count;
     bool using_dense;
 
-    HybridDynamicChildren() : entries(), dense(nullptr), active_count(0), using_dense(false) {
+    HybridDynamicChildren() : entries(), dense(nullptr, DenseDeleter{nullptr}), active_count(0), using_dense(false) {
         for (auto &e : entries) { e.index = invalid_index; }
     }
+    explicit HybridDynamicChildren(std::pmr::memory_resource *resource)
+        : entries(), dense(nullptr, DenseDeleter{resource}), active_count(0), using_dense(false) {
+        for (auto &e : entries) { e.index = invalid_index; }
+    }
+
     HybridDynamicChildren(const HybridDynamicChildren &) = delete;
     HybridDynamicChildren(HybridDynamicChildren &&) = default;
     HybridDynamicChildren &operator=(const HybridDynamicChildren &) = delete;
@@ -264,7 +281,16 @@ struct HybridDynamicChildren {
 
     void ensure_dense_allocated() {
         if (dense != nullptr) return;
-        dense = std::make_unique_for_overwrite<IndexType[]>(Capacity);
+        IndexType *ptr = nullptr;
+        auto &deleter = dense.get_deleter();
+        if (deleter.resource) {
+            auto raw_ptr = deleter.resource->allocate(sizeof(IndexType) * Capacity, alignof(IndexType));
+            ptr = static_cast<IndexType *>(raw_ptr);
+        } else {
+            auto raw_ptr = ::operator new[](sizeof(IndexType) * Capacity);
+            ptr = static_cast<IndexType *>(raw_ptr);
+        }
+        dense.reset(ptr);
         std::fill(dense.get(), dense.get() + Capacity, invalid_index);
     }
 
