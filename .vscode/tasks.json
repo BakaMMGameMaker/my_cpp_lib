@@ -4,12 +4,12 @@
         {
             "label": "format",
             "type": "shell",
-            "command": "clang-format -i main.cpp"
+            "command": "clang-format -i ${file}"
         },
         {
             "label": "tidy",
             "type": "shell",
-            "command": "clang-tidy main.cpp -- -std=c++23"
+            "command": "clang-tidy ${file} -- -std=c++23"
         },
         {
             "label": "build",
@@ -17,33 +17,27 @@
             "command": "clang++",
             "args": [
                 "-std=c++23",
+                "-O2",
+                "${file}",
+                "-o",
+                "${fileDirname}/${fileBasenameNoExtension}.exe",
+                "-I",
+                "D:/allfolders/code/advanced/cpp/my_cpp_lib/",
                 "-Wall",
                 "-Wextra",
-                "-O2",
-                "main.cpp",
-                "-o",
-                "main.exe"
             ]
         },
         {
             "label": "run",
             "type": "shell",
-            "command": "cmd",
-            "args": [
-                "/c",
-                "start",
-                "cmd",
-                "/k",
-                "main.exe"
-            ]
+            "command": "${fileDirname}/${fileBasenameNoExtension}.exe"
         },
         {
             "label": "full-pipeline",
             "dependsOn": [
-                "format",
-                "tidy",
+                // "format",
+                // "tidy",
                 "build",
-                "run"
             ],
             "dependsOrder": "sequence",
             "group": {

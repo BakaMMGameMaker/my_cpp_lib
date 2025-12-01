@@ -1,5 +1,8 @@
 #pragma once
 #include "salias.h"
+#include "sutils.hpp"
+#include <algorithm>
+#include <array>
 #include <memory>
 
 // ForEachChildCallable 概念约束：需要能以 (SizeT, IndexType) 的形式被调用
@@ -8,6 +11,7 @@ concept ForEachChildCallable = requires(Func &&func, UChar key, IndexType index)
     { std::forward<Func>(func)(key, index) }; // 没有 forward 就只能保证 func 为左值时可以被调用
 };
 
+// Tries 树孩子存储数据结构概念约束
 template <typename ChildrenStorageType>
 concept TriesChildrenStorage =
     requires(ChildrenStorageType storage, const ChildrenStorageType const_storage, UChar key, UInt32 index) {
@@ -21,7 +25,7 @@ concept TriesChildrenStorage =
         } -> std::same_as<void>;
     };
 
-// 仅用 array<Capacity> 来存储孩子节点，性能较高，但内存开销较大
+// 仅用 array<Capacity> 来存储孩子节点，性能最高，但内存占用固定，开销较大
 template <typename IndexType, SizeT Capacity> struct FixedChildren {
     static constexpr IndexType invalid_index = std::numeric_limits<IndexType>::max();
 
@@ -67,8 +71,9 @@ template <typename IndexType, SizeT Capacity> struct FixedChildren {
 };
 
 // 子节点数量少时，用 array<Threshold> 来存储节点，可以在子节点数量少时避免 Capacity 次循环，性能较高，但内存开销更大
+// 如果没有特殊要求，请使用 HybridDynamicChildren
 template <typename IndexType, SizeT Capacity, SizeT Threshold, bool AllowShrinkToSparse = false>
-struct HybridFixedChildren {
+struct [[deprecated("HybridFixedChildren is deprecated, use HybridDynamicChildren instead")]] HybridFixedChildren {
     static constexpr IndexType invalid_index = std::numeric_limits<IndexType>::max();
 
     struct Entry {
@@ -84,7 +89,7 @@ struct HybridFixedChildren {
 
     HybridFixedChildren() : entries(), dense(), using_dense(false), active_count(0) {
         for (auto &e : entries) { e.index = invalid_index; }
-        dense.std::fill(invalid_index);
+        dense.fill(invalid_index);
     }
     HybridFixedChildren(const HybridFixedChildren &) = delete;
     HybridFixedChildren(HybridFixedChildren &&) = default;
@@ -198,9 +203,8 @@ struct HybridFixedChildren {
         if (!using_dense) {
             for (SizeT i = 0; i < active_count; ++i) {
                 const Entry &entry = entries[i];
-                if (entries[i].index == invalid_index) [[unlikely]] // 防御
-                    continue;
-                func(CastUChar(entry.key), entry.index);
+                if (entry.index != invalid_index) [[likely]] // 防御
+                    func(CastUChar(entry.key), entry.index);
             }
         } else {
             for (SizeT key = 0; key < Capacity; ++key) {
@@ -260,8 +264,8 @@ struct HybridDynamicChildren {
 
     void ensure_dense_allocated() {
         if (dense != nullptr) return;
-        dense = std::make_unique<IndexType[]>(Capacity);
-        for (SizeT i = 0; i < Capacity; ++i) dense[i] = invalid_index;
+        dense = std::make_unique_for_overwrite<IndexType[]>(Capacity);
+        std::fill(dense.get(), dense.get() + Capacity, invalid_index);
     }
 
     void set_entry(UChar key, IndexType index) {
@@ -349,9 +353,8 @@ struct HybridDynamicChildren {
         if (!using_dense) {
             for (SizeT i = 0; i < active_count; ++i) {
                 const Entry &entry = entries[i];
-                if (entry.index == invalid_index) [[unlikely]]
-                    continue;
-                func(CastUChar(entry.key), entry.index);
+                if (entry.index != invalid_index) [[likely]] // 防御
+                    func(CastUChar(entry.key), entry.index);
             }
         } else {
             if (dense == nullptr) [[unlikely]]
