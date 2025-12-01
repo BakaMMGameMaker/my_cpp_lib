@@ -4,7 +4,6 @@
 #include <array>
 #include <concepts>
 #include <limits>
-#include <map>
 #include <memory>
 #include <memory_resource>
 #include <mutex>
@@ -105,6 +104,7 @@ struct HybridFixedChildren {
     [[nodiscard]] IndexType get(UChar key) const noexcept {
         if (using_dense) return dense[CastSizeT(key)]; // 如果正在使用稠密数组，直接返回对应槽位存储值
 
+        // TODO：可能的 SIMD 优化
         for (SizeT i = 0; i < active_count; ++i) {
             if (entries[i].key == key) return entries[i].index;
         }
@@ -223,7 +223,7 @@ struct HybridFixedChildren {
 
 // 子节点数量少时使用 array<Threshold> 存储节点，仅在需要时扩展更多空间，内存友好，性能较高
 template <typename IndexType, SizeT Capacity, SizeT Threshold, bool AllowShrinkToSparse = false>
-struct HybridHeapChildren {
+struct HybridDynamicChildren {
     static constexpr IndexType invalid_index = std::numeric_limits<IndexType>::max();
 
     struct Entry {
@@ -233,16 +233,16 @@ struct HybridHeapChildren {
 
     std::array<Entry, Threshold> entries;
     std::unique_ptr<IndexType[]> dense; // nullptr 表示尚未分配
-    bool using_dense;
     SizeT active_count;
+    bool using_dense;
 
-    HybridHeapChildren() : entries(), dense(nullptr), using_dense(false), active_count(0) {
+    HybridDynamicChildren() : entries(), dense(nullptr), active_count(0), using_dense(false) {
         for (auto &e : entries) { e.index = invalid_index; }
     }
-    HybridHeapChildren(const HybridHeapChildren &) = delete;
-    HybridHeapChildren(HybridHeapChildren &&) = default;
-    HybridHeapChildren &operator=(const HybridHeapChildren &) = delete;
-    HybridHeapChildren &operator=(HybridHeapChildren &&) = default;
+    HybridDynamicChildren(const HybridDynamicChildren &) = delete;
+    HybridDynamicChildren(HybridDynamicChildren &&) = default;
+    HybridDynamicChildren &operator=(const HybridDynamicChildren &) = delete;
+    HybridDynamicChildren &operator=(HybridDynamicChildren &&) = default;
 
     [[nodiscard]] IndexType get(UChar key) const noexcept {
         if (using_dense) {
@@ -381,6 +381,7 @@ template <typename IndexType> struct TriesFreeList<IndexType, false> {
     explicit TriesFreeList(std::pmr::memory_resource *) noexcept {}
 
     [[nodiscard]] bool empty() const noexcept { return true; }
+    [[nodiscard]] SizeT size() const noexcept { return 0; }
     void push(IndexType) noexcept {}
     [[nodiscard]] IndexType pop() noexcept { return {}; }
 };
@@ -390,6 +391,7 @@ template <typename IndexType> struct TriesFreeList<IndexType, true> {
     explicit TriesFreeList(std::pmr::memory_resource *resource) : indices(resource) {}
 
     [[nodiscard]] bool empty() const noexcept { return indices.empty(); }
+    [[nodiscard]] SizeT size() const noexcept { return indices.size(); }
     void push(IndexType index) { indices.push_back(index); }
     [[nodiscard]] IndexType pop() {
         IndexType index = indices.back();
@@ -398,8 +400,21 @@ template <typename IndexType> struct TriesFreeList<IndexType, true> {
     }
 };
 
+template <typename Derived>
+concept DerivedTries = requires(Derived d, const Derived cd, std::string_view sv, SizeT limit) {
+    { d.push_impl(sv) } -> std::same_as<void>;                                      // 添加单词
+    { d.erase_impl(sv) } -> std::same_as<bool>;                                     // 移除单词
+    { cd.size_impl() } -> std::same_as<SizeT>;                                      // 单词总数
+    { cd.empty_impl() } -> std::same_as<bool>;                                      // 树是否为空
+    { cd.active_node_count_impl() } -> std::same_as<SizeT>;                         // 逻辑活跃的节点数
+    { cd.contains_impl(sv) } -> std::same_as<bool>;                                 // 是否包含某单词
+    { cd.contains_starts_with_impl(sv) } -> std::same_as<bool>;                     // 是否包含以给定 sv 为前缀的单词
+    { cd.prefix_search_impl(sv, limit) } -> std::same_as<std::vector<std::string>>; // 所有以 sv 为前缀的单词
+    { cd.longest_prefix_of_impl(sv) } -> std::same_as<std::string_view>;            // 最长前缀匹配结果
+};
+
 // CRTP base
-template <typename Derived> class TriesBase {
+template <DerivedTries Derived> class TriesBase {
 protected:
     TriesBase() = default;
     ~TriesBase() = default;
@@ -415,6 +430,24 @@ protected:
     mutable std::shared_mutex shared_mutex_;
 
 public:
+    // 获取单词总数
+    [[nodiscard]] SizeT size() const noexcept {
+        std::shared_lock<std::shared_mutex> read_lock(shared_mutex_);
+        return derived().size_impl();
+    }
+
+    // 树是否为空
+    [[nodiscard]] bool empty() const noexcept {
+        std::shared_lock<std::shared_mutex> read_lock(shared_mutex_);
+        return derived().empty_impl();
+    }
+
+    // 活跃节点总数（启用节点回收时值有意义）
+    [[nodiscard]] SizeT active_node_count() const noexcept {
+        std::shared_lock<std::shared_mutex> read_lock(shared_mutex_);
+        return derived().active_node_count_impl();
+    }
+
     // 添加新的单词
     void push(std::string_view word) {
         std::unique_lock<std::shared_mutex> write_lock(shared_mutex_);
@@ -443,360 +476,372 @@ public:
         std::shared_lock<std::shared_mutex> read_lock(shared_mutex_);
         return derived().prefix_search_impl(prefix, limit);
     }
-};
 
-// 原生的链式结构 Tries
-class STries : public TriesBase<STries> {
-    friend class TriesBase<STries>;
-
-    struct Node {
-        std::map<char, std::unique_ptr<Node>> children;
-        bool is_end = false;
-    };
-
-    std::unique_ptr<Node> root = std::make_unique<Node>();
-
-    // 深度优先搜索收集结果
-    void dfs(const Node *node, std::string &current_word, std::vector<std::string> &result,
-             SizeT limit) const noexcept {
-        if (result.size() >= limit) return;
-        if (node->is_end) {
-            result.push_back(current_word);
-            if (result.size() >= limit) return;
-        }
-
-        for (auto &[ch, child] : node->children) {
-            current_word.push_back(ch);
-            dfs(child.get(), current_word, result, limit);
-            current_word.pop_back();
-            if (result.size() >= limit) return;
-        }
-    }
-
-    // 定位前缀对应的节点
-    [[nodiscard]] const Node *find_node(std::string_view prefix) const noexcept {
-        const Node *current_node = root.get();
-        for (char ch : prefix) {
-            auto it = current_node->children.find(ch);
-            if (it == current_node->children.end()) return nullptr;
-            current_node = it->second.get();
-        }
-        return current_node;
-    }
-
-    void push_impl(std::string_view word) {
-        Node *current_node = root.get();
-        for (char ch : word) {
-            auto it = current_node->children.find(ch);
-            if (it == current_node->children.end()) {
-                auto insert_result = current_node->children.try_emplace(ch, std::make_unique<Node>());
-                it = insert_result.first;
-            }
-            current_node = it->second.get();
-        }
-        current_node->is_end = true;
-    }
-
-    [[nodiscard]] bool contains_impl(std::string_view word) const noexcept {
-        const Node *node = find_node(word);
-        return node != nullptr && node->is_end;
-    }
-
-    bool erase_impl(std::string_view word) {
-        Node *current_node = root.get();
-        std::vector<std::pair<Node *, char>> path; // 记录路径
-        path.reserve(word.size());
-
-        for (char ch : word) {
-            auto it = current_node->children.find(ch);
-            if (it == current_node->children.end()) return false; // word 不存在
-            path.emplace_back(current_node, ch);
-            current_node = it->second.get();
-        }
-
-        if (!current_node->is_end) return false; // 当前单词仅为前缀，非完整单词
-        current_node->is_end = false;            // 把单词末尾标记为非 end
-        if (!current_node->children.empty()) return true;
-
-        for (auto it = path.rbegin(); it != path.rend(); ++it) {
-            Node *parent = it->first;
-            char edge = it->second;
-            auto child_it = parent->children.find(edge);
-            if (child_it == parent->children.end()) [[unlikely]]
-                break;
-
-            const Node *child = child_it->second.get();
-            if (child->is_end || !child->children.empty()) break; // 不作为某单词的结尾，也不属于任何单词的前缀部分
-            parent->children.erase(child_it);
-        }
-        return true;
-    }
-
-    [[nodiscard]] bool contains_starts_with_impl(std::string_view prefix) const noexcept { return find_node(prefix); }
-
-    [[nodiscard]] std::vector<std::string> prefix_search_impl(std::string_view prefix, SizeT limit = SizeMax) const {
-        const Node *start_node = find_node(prefix);
-        if (start_node == nullptr) return {};
-
-        std::vector<std::string> result;
-        result.reserve(limit == SizeMax ? 16 : limit);
-        std::string current_word(prefix);
-        dfs(start_node, current_word, result, limit);
-        return result;
-    }
-
-public:
-    STries() = default;
-};
-
-// 使用对象池存储节点
-class SFlatTries : public TriesBase<SFlatTries> {
-    friend class TriesBase<SFlatTries>;
-
-    struct Node {
-        std::map<char, UInt32> children;
-        bool is_end = false;
-    };
-
-    std::vector<Node> node_pool; // index 是在池中的下标
-    static constexpr UInt32 invalid_index = std::numeric_limits<UInt32>::max();
-
-    UInt32 create_node() {
-        node_pool.emplace_back();
-        return static_cast<UInt32>(node_pool.size() - 1);
-    }
-
-    void dfs(UInt32 node_index, std::string &current_word, std::vector<std::string> &result,
-             SizeT limit) const noexcept {
-        if (result.size() >= limit) return;
-        const Node &current_node = node_pool[node_index];
-        if (current_node.is_end) {
-            result.push_back(current_word);
-            if (result.size() >= limit) return;
-        }
-
-        for (const auto &[ch, child_node_index] : current_node.children) {
-            current_word.push_back(ch);
-            dfs(child_node_index, current_word, result, limit);
-            current_word.pop_back();
-            if (result.size() >= limit) return;
-        }
-    }
-
-    [[nodiscard]] UInt32 find_node_index(std::string_view prefix) const noexcept {
-        if (node_pool.empty()) [[unlikely]]
-            return invalid_index;
-        UInt32 current_node_index = 0; // root
-        for (char ch : prefix) {
-            const Node &current_node = node_pool[current_node_index];
-            auto it = current_node.children.find(ch);
-            if (it == current_node.children.end()) return invalid_index;
-            current_node_index = it->second;
-        }
-        return current_node_index;
-    }
-
-    void push_impl(std::string_view word) {
-        UInt32 current_node_index = 0; // root
-        for (char ch : word) {
-            // 这里不应该使用引用，即便是单线程，create node 也会导致悬空引用
-            auto it = node_pool[current_node_index].children.find(ch);
-            if (it == node_pool[current_node_index].children.end()) {
-                UInt32 child_node_index = create_node(); // 此处可能导致 reallocate
-                node_pool[current_node_index].children.try_emplace(ch, child_node_index);
-                current_node_index = child_node_index;
-            } else {
-                current_node_index = it->second;
-            }
-        }
-        node_pool[current_node_index].is_end = true;
-    }
-
-    [[nodiscard]] bool contains_impl(std::string_view word) const noexcept {
-        UInt32 node_index = find_node_index(word);
-        return node_index != invalid_index && node_pool[node_index].is_end;
-    }
-
-    bool erase_impl(std::string_view word) {
-        UInt32 current_node_index = 0; // root
-        std::vector<std::pair<UInt32, char>> path;
-        path.reserve(word.size());
-
-        for (char ch : word) {
-            Node &current_node = node_pool[current_node_index];
-            auto it = current_node.children.find(ch);
-            if (it == current_node.children.end()) return false;
-            path.emplace_back(current_node_index, ch);
-            current_node_index = it->second;
-        }
-
-        Node &terminal_node = node_pool[current_node_index];
-        if (!terminal_node.is_end) return false;
-        terminal_node.is_end = false;
-        if (!terminal_node.children.empty()) return true;
-
-        for (auto it = path.rbegin(); it != path.rend(); ++it) {
-            UInt32 parent_index = it->first;
-            char edge = it->second;
-            Node &parent_node = node_pool[parent_index];
-            auto child_it = parent_node.children.find(edge);
-            if (child_it == parent_node.children.end()) [[unlikely]]
-                break;
-
-            UInt32 child_node_index = child_it->second;
-            const Node &child_node = node_pool[child_node_index];
-            if (child_node.is_end || !child_node.children.empty()) break;
-            parent_node.children.erase(child_it);
-        }
-        return true;
-    }
-
-    [[nodiscard]] bool contains_starts_with_impl(std::string_view prefix) const noexcept {
-        return find_node_index(prefix) != invalid_index;
-    }
-
-    [[nodiscard]] std::vector<std::string> prefix_search_impl(std::string_view prefix, SizeT limit = SizeMax) const {
-        UInt32 start_node_index = find_node_index(prefix);
-        if (start_node_index == invalid_index) return {};
-
-        std::vector<std::string> result;
-        result.reserve(limit == SizeMax ? 16 : limit);
-        std::string current_word(prefix);
-        dfs(start_node_index, current_word, result, limit);
-        return result;
-    }
-
-public:
-    SFlatTries() : node_pool() {
-        node_pool.reserve(1024);
-        create_node();
+    // 获取给定文本的所有前缀中在树中存在且作为完整单词的最长结果
+    [[nodiscard]] std::string_view longest_prefix_of(std::string_view text) const noexcept {
+        std::shared_lock<std::shared_mutex> read_lock(shared_mutex_);
+        return derived().longest_prefix_of_impl(text);
     }
 };
 
-// 允许用户提供 memory resource
-class SPmrFlatTries : public TriesBase<SPmrFlatTries> {
-    friend class TriesBase<SPmrFlatTries>;
+// // 原生的链式结构 Tries
+// template <typename Dummy = void> class [[deprecated]] STries : public TriesBase<STries<Dummy>> {
+//     friend class TriesBase<STries<Dummy>>;
 
-    struct Node {
-        std::pmr::map<char, UInt32> children;
-        bool is_end = false;
-        explicit Node(std::pmr::memory_resource *resource) noexcept : children(resource) {}
-    };
+//     struct Node {
+//         std::map<char, std::unique_ptr<Node>> children;
+//         bool is_end = false;
+//     };
 
-    std::pmr::vector<Node> node_pool;
-    std::pmr::memory_resource *memory_resource;
-    static constexpr UInt32 invalid_index = std::numeric_limits<UInt32>::max();
+//     std::unique_ptr<Node> root = std::make_unique<Node>();
 
-    UInt32 create_node() {
-        node_pool.emplace_back(memory_resource);
-        return static_cast<UInt32>(node_pool.size() - 1);
-    }
+//     // 深度优先搜索收集结果
+//     void dfs(const Node *node, std::string &current_word, std::vector<std::string> &result,
+//              SizeT limit) const noexcept {
+//         if (result.size() >= limit) return;
+//         if (node->is_end) {
+//             result.push_back(current_word);
+//             if (result.size() >= limit) return;
+//         }
 
-    void dfs(UInt32 node_index, std::string &current_word, std::vector<std::string> &result,
-             SizeT limit) const noexcept {
-        if (result.size() >= limit) return;
-        const Node &current_node = node_pool[node_index];
-        if (current_node.is_end) {
-            result.push_back(current_word);
-            if (result.size() >= limit) return;
-        }
+//         for (auto &[ch, child] : node->children) {
+//             current_word.push_back(ch);
+//             dfs(child.get(), current_word, result, limit);
+//             current_word.pop_back();
+//             if (result.size() >= limit) return;
+//         }
+//     }
 
-        for (const auto &[ch, child_node_index] : current_node.children) {
-            current_word.push_back(ch);
-            dfs(child_node_index, current_word, result, limit);
-            current_word.pop_back();
-            if (result.size() >= limit) return;
-        }
-    }
+//     // 定位前缀对应的节点
+//     [[nodiscard]] const Node *find_node(std::string_view prefix) const noexcept {
+//         const Node *current_node = root.get();
+//         for (char ch : prefix) {
+//             auto it = current_node->children.find(ch);
+//             if (it == current_node->children.end()) return nullptr;
+//             current_node = it->second.get();
+//         }
+//         return current_node;
+//     }
 
-    [[nodiscard]] UInt32 find_node_index(std::string_view prefix) const noexcept {
-        if (node_pool.empty()) [[unlikely]]
-            return invalid_index;
-        UInt32 current_node_index = 0; // root
-        for (char ch : prefix) {
-            const Node &current_node = node_pool[current_node_index];
-            auto it = current_node.children.find(ch);
-            if (it == current_node.children.end()) return invalid_index;
-            current_node_index = it->second;
-        }
-        return current_node_index;
-    }
+//     void push_impl(std::string_view word) {
+//         Node *current_node = root.get();
+//         for (char ch : word) {
+//             auto it = current_node->children.find(ch);
+//             if (it == current_node->children.end()) {
+//                 auto insert_result = current_node->children.try_emplace(ch, std::make_unique<Node>());
+//                 it = insert_result.first;
+//             }
+//             current_node = it->second.get();
+//         }
+//         current_node->is_end = true;
+//     }
 
-    void push_impl(std::string_view word) {
-        UInt32 current_node_index = 0; // root
-        for (char ch : word) {
-            // 这里不应该使用引用，即便是单线程，create node 也会导致悬空引用
-            auto it = node_pool[current_node_index].children.find(ch);
-            if (it == node_pool[current_node_index].children.end()) {
-                UInt32 child_node_index = create_node();
-                node_pool[current_node_index].children.try_emplace(ch, child_node_index);
-                current_node_index = child_node_index;
-            } else {
-                current_node_index = it->second;
-            }
-        }
-        node_pool[current_node_index].is_end = true;
-    }
+//     [[nodiscard]] bool contains_impl(std::string_view word) const noexcept {
+//         const Node *node = find_node(word);
+//         return node != nullptr && node->is_end;
+//     }
 
-    [[nodiscard]] bool contains_impl(std::string_view word) const noexcept {
-        UInt32 node_index = find_node_index(word);
-        return node_index != invalid_index && node_pool[node_index].is_end;
-    }
+//     bool erase_impl(std::string_view word) {
+//         Node *current_node = root.get();
+//         std::vector<std::pair<Node *, char>> path; // 记录路径
+//         path.reserve(word.size());
 
-    bool erase_impl(std::string_view word) {
-        UInt32 current_node_index = 0; // root
-        std::pmr::vector<std::pair<UInt32, char>> path(memory_resource);
-        path.reserve(word.size());
-        for (char ch : word) {
-            Node &current_node = node_pool[current_node_index];
-            auto it = current_node.children.find(ch);
-            if (it == current_node.children.end()) return false;
-            path.emplace_back(current_node_index, ch);
-            current_node_index = it->second;
-        }
+//         for (char ch : word) {
+//             auto it = current_node->children.find(ch);
+//             if (it == current_node->children.end()) return false; // word 不存在
+//             path.emplace_back(current_node, ch);
+//             current_node = it->second.get();
+//         }
 
-        Node &terminal_node = node_pool[current_node_index];
-        if (!terminal_node.is_end) return false;
-        terminal_node.is_end = false;
-        if (!terminal_node.children.empty()) return true;
+//         if (!current_node->is_end) return false; // 当前单词仅为前缀，非完整单词
+//         current_node->is_end = false;            // 把单词末尾标记为非 end
+//         if (!current_node->children.empty()) return true;
 
-        for (auto it = path.rbegin(); it != path.rend(); ++it) {
-            UInt32 parent_index = it->first;
-            char edge = it->second;
-            Node &parent_node = node_pool[parent_index];
-            auto child_it = parent_node.children.find(edge);
-            if (child_it == parent_node.children.end()) [[unlikely]]
-                break;
+//         for (auto it = path.rbegin(); it != path.rend(); ++it) {
+//             Node *parent = it->first;
+//             char edge = it->second;
+//             auto child_it = parent->children.find(edge);
+//             if (child_it == parent->children.end()) [[unlikely]]
+//                 break;
 
-            UInt32 child_node_index = child_it->second;
-            const Node &child_node = node_pool[child_node_index];
-            if (child_node.is_end || !child_node.children.empty()) break;
-            parent_node.children.erase(child_it);
-        }
-        return true;
-    }
+//             const Node *child = child_it->second.get();
+//             if (child->is_end || !child->children.empty()) break; // 不作为某单词的结尾，也不属于任何单词的前缀部分
+//             parent->children.erase(child_it);
+//         }
+//         return true;
+//     }
 
-    [[nodiscard]] bool contains_starts_with_impl(std::string_view prefix) const noexcept {
-        return find_node_index(prefix) != invalid_index;
-    }
+//     [[nodiscard]] bool contains_starts_with_impl(std::string_view prefix) const noexcept { return find_node(prefix);
+//     }
 
-    [[nodiscard]] std::vector<std::string> prefix_search_impl(std::string_view prefix, SizeT limit = SizeMax) const {
-        UInt32 start_node_index = find_node_index(prefix);
-        if (start_node_index == invalid_index) return {};
+//     [[nodiscard]] std::vector<std::string> prefix_search_impl(std::string_view prefix, SizeT limit = SizeMax) const {
+//         const Node *start_node = find_node(prefix);
+//         if (start_node == nullptr) return {};
 
-        std::vector<std::string> result;
-        result.reserve(limit == SizeMax ? 16 : limit);
-        std::string current_word(prefix);
-        dfs(start_node_index, current_word, result, limit);
-        return result;
-    }
+//         std::vector<std::string> result;
+//         result.reserve(limit == SizeMax ? 16 : limit);
+//         std::string current_word(prefix);
+//         current_word.reserve(prefix.size() + 32);
+//         dfs(start_node, current_word, result, limit);
+//         return result;
+//     }
 
-public:
-    explicit SPmrFlatTries(std::pmr::memory_resource *resource) : node_pool(resource), memory_resource(resource) {
-        node_pool.reserve(1024);
-        create_node();
-    }
-};
+//     [[nodiscard]] std::string_view longest_prefix_of_impl(std::string_view) const noexcept { return {}; }
+
+// public:
+//     STries() = default;
+// };
+
+// // 使用对象池存储节点
+// template <typename Dummy = void> class [[deprecated]] SFlatTries : public TriesBase<SFlatTries<Dummy>> {
+//     friend class TriesBase<SFlatTries<Dummy>>;
+
+//     struct Node {
+//         std::map<char, UInt32> children;
+//         bool is_end = false;
+//     };
+
+//     std::vector<Node> node_pool; // index 是在池中的下标
+//     static constexpr UInt32 invalid_index = std::numeric_limits<UInt32>::max();
+
+//     UInt32 create_node() {
+//         node_pool.emplace_back();
+//         return static_cast<UInt32>(node_pool.size() - 1);
+//     }
+
+//     void dfs(UInt32 node_index, std::string &current_word, std::vector<std::string> &result,
+//              SizeT limit) const noexcept {
+//         if (result.size() >= limit) return;
+//         const Node &current_node = node_pool[node_index];
+//         if (current_node.is_end) {
+//             result.push_back(current_word);
+//             if (result.size() >= limit) return;
+//         }
+
+//         for (const auto &[ch, child_node_index] : current_node.children) {
+//             current_word.push_back(ch);
+//             dfs(child_node_index, current_word, result, limit);
+//             current_word.pop_back();
+//             if (result.size() >= limit) return;
+//         }
+//     }
+
+//     [[nodiscard]] UInt32 find_node_index(std::string_view prefix) const noexcept {
+//         if (node_pool.empty()) [[unlikely]]
+//             return invalid_index;
+//         UInt32 current_node_index = 0; // root
+//         for (char ch : prefix) {
+//             const Node &current_node = node_pool[current_node_index];
+//             auto it = current_node.children.find(ch);
+//             if (it == current_node.children.end()) return invalid_index;
+//             current_node_index = it->second;
+//         }
+//         return current_node_index;
+//     }
+
+//     void push_impl(std::string_view word) {
+//         UInt32 current_node_index = 0; // root
+//         for (char ch : word) {
+//             // 这里不应该使用引用，即便是单线程，create node 也会导致悬空引用
+//             auto it = node_pool[current_node_index].children.find(ch);
+//             if (it == node_pool[current_node_index].children.end()) {
+//                 UInt32 child_node_index = create_node(); // 此处可能导致 reallocate
+//                 node_pool[current_node_index].children.try_emplace(ch, child_node_index);
+//                 current_node_index = child_node_index;
+//             } else {
+//                 current_node_index = it->second;
+//             }
+//         }
+//         node_pool[current_node_index].is_end = true;
+//     }
+
+//     [[nodiscard]] bool contains_impl(std::string_view word) const noexcept {
+//         UInt32 node_index = find_node_index(word);
+//         return node_index != invalid_index && node_pool[node_index].is_end;
+//     }
+
+//     bool erase_impl(std::string_view word) {
+//         UInt32 current_node_index = 0; // root
+//         std::vector<std::pair<UInt32, char>> path;
+//         path.reserve(word.size());
+
+//         for (char ch : word) {
+//             Node &current_node = node_pool[current_node_index];
+//             auto it = current_node.children.find(ch);
+//             if (it == current_node.children.end()) return false;
+//             path.emplace_back(current_node_index, ch);
+//             current_node_index = it->second;
+//         }
+
+//         Node &terminal_node = node_pool[current_node_index];
+//         if (!terminal_node.is_end) return false;
+//         terminal_node.is_end = false;
+//         if (!terminal_node.children.empty()) return true;
+
+//         for (auto it = path.rbegin(); it != path.rend(); ++it) {
+//             UInt32 parent_index = it->first;
+//             char edge = it->second;
+//             Node &parent_node = node_pool[parent_index];
+//             auto child_it = parent_node.children.find(edge);
+//             if (child_it == parent_node.children.end()) [[unlikely]]
+//                 break;
+
+//             UInt32 child_node_index = child_it->second;
+//             const Node &child_node = node_pool[child_node_index];
+//             if (child_node.is_end || !child_node.children.empty()) break;
+//             parent_node.children.erase(child_it);
+//         }
+//         return true;
+//     }
+
+//     [[nodiscard]] bool contains_starts_with_impl(std::string_view prefix) const noexcept {
+//         return find_node_index(prefix) != invalid_index;
+//     }
+
+//     [[nodiscard]] std::vector<std::string> prefix_search_impl(std::string_view prefix, SizeT limit = SizeMax) const {
+//         UInt32 start_node_index = find_node_index(prefix);
+//         if (start_node_index == invalid_index) return {};
+
+//         std::vector<std::string> result;
+//         result.reserve(limit == SizeMax ? 16 : limit);
+//         std::string current_word(prefix);
+//         current_word.reserve(prefix.size() + 32);
+//         dfs(start_node_index, current_word, result, limit);
+//         return result;
+//     }
+
+// public:
+//     SFlatTries() : node_pool() {
+//         node_pool.reserve(1024);
+//         create_node();
+//     }
+// };
+
+// // 允许用户提供 memory resource
+// template <typename Dummy = void> class [[deprecated]] SPmrFlatTries : public TriesBase<SPmrFlatTries<Dummy>> {
+//     friend class TriesBase<SPmrFlatTries<Dummy>>;
+
+//     struct Node {
+//         std::pmr::map<char, UInt32> children;
+//         bool is_end = false;
+//         explicit Node(std::pmr::memory_resource *resource) noexcept : children(resource) {}
+//     };
+
+//     std::pmr::vector<Node> node_pool;
+//     std::pmr::memory_resource *memory_resource;
+//     static constexpr UInt32 invalid_index = std::numeric_limits<UInt32>::max();
+
+//     UInt32 create_node() {
+//         node_pool.emplace_back(memory_resource);
+//         return static_cast<UInt32>(node_pool.size() - 1);
+//     }
+
+//     void dfs(UInt32 node_index, std::string &current_word, std::vector<std::string> &result,
+//              SizeT limit) const noexcept {
+//         if (result.size() >= limit) return;
+//         const Node &current_node = node_pool[node_index];
+//         if (current_node.is_end) {
+//             result.push_back(current_word);
+//             if (result.size() >= limit) return;
+//         }
+
+//         for (const auto &[ch, child_node_index] : current_node.children) {
+//             current_word.push_back(ch);
+//             dfs(child_node_index, current_word, result, limit);
+//             current_word.pop_back();
+//             if (result.size() >= limit) return;
+//         }
+//     }
+
+//     [[nodiscard]] UInt32 find_node_index(std::string_view prefix) const noexcept {
+//         if (node_pool.empty()) [[unlikely]]
+//             return invalid_index;
+//         UInt32 current_node_index = 0; // root
+//         for (char ch : prefix) {
+//             const Node &current_node = node_pool[current_node_index];
+//             auto it = current_node.children.find(ch);
+//             if (it == current_node.children.end()) return invalid_index;
+//             current_node_index = it->second;
+//         }
+//         return current_node_index;
+//     }
+
+//     void push_impl(std::string_view word) {
+//         UInt32 current_node_index = 0; // root
+//         for (char ch : word) {
+//             // 这里不应该使用引用，即便是单线程，create node 也会导致悬空引用
+//             auto it = node_pool[current_node_index].children.find(ch);
+//             if (it == node_pool[current_node_index].children.end()) {
+//                 UInt32 child_node_index = create_node();
+//                 node_pool[current_node_index].children.try_emplace(ch, child_node_index);
+//                 current_node_index = child_node_index;
+//             } else {
+//                 current_node_index = it->second;
+//             }
+//         }
+//         node_pool[current_node_index].is_end = true;
+//     }
+
+//     [[nodiscard]] bool contains_impl(std::string_view word) const noexcept {
+//         UInt32 node_index = find_node_index(word);
+//         return node_index != invalid_index && node_pool[node_index].is_end;
+//     }
+
+//     bool erase_impl(std::string_view word) {
+//         UInt32 current_node_index = 0; // root
+//         std::pmr::vector<std::pair<UInt32, char>> path(memory_resource);
+//         path.reserve(word.size());
+//         for (char ch : word) {
+//             Node &current_node = node_pool[current_node_index];
+//             auto it = current_node.children.find(ch);
+//             if (it == current_node.children.end()) return false;
+//             path.emplace_back(current_node_index, ch);
+//             current_node_index = it->second;
+//         }
+
+//         Node &terminal_node = node_pool[current_node_index];
+//         if (!terminal_node.is_end) return false;
+//         terminal_node.is_end = false;
+//         if (!terminal_node.children.empty()) return true;
+
+//         for (auto it = path.rbegin(); it != path.rend(); ++it) {
+//             UInt32 parent_index = it->first;
+//             char edge = it->second;
+//             Node &parent_node = node_pool[parent_index];
+//             auto child_it = parent_node.children.find(edge);
+//             if (child_it == parent_node.children.end()) [[unlikely]]
+//                 break;
+
+//             UInt32 child_node_index = child_it->second;
+//             const Node &child_node = node_pool[child_node_index];
+//             if (child_node.is_end || !child_node.children.empty()) break;
+//             parent_node.children.erase(child_it);
+//         }
+//         return true;
+//     }
+
+//     [[nodiscard]] bool contains_starts_with_impl(std::string_view prefix) const noexcept {
+//         return find_node_index(prefix) != invalid_index;
+//     }
+
+//     [[nodiscard]] std::vector<std::string> prefix_search_impl(std::string_view prefix, SizeT limit = SizeMax) const {
+//         UInt32 start_node_index = find_node_index(prefix);
+//         if (start_node_index == invalid_index) return {};
+
+//         std::vector<std::string> result;
+//         result.reserve(limit == SizeMax ? 16 : limit);
+//         std::string current_word(prefix);
+//         current_word.reserve(prefix.size() + 32);
+//         dfs(start_node_index, current_word, result, limit);
+//         return result;
+//     }
+
+// public:
+//     explicit SPmrFlatTries(std::pmr::memory_resource *resource) : node_pool(resource), memory_resource(resource) {
+//         node_pool.reserve(1024);
+//         create_node();
+//     }
+// };
 
 /*
  * @brief 允许用户提供 memory resource ，指定节点中存储孩子的数据结构，是否复用内存池中死亡的节点
@@ -813,56 +858,63 @@ class SPmrArrayTries : public TriesBase<SPmrArrayTries<ChildrenStorageType, Reus
 
     struct Node {
         ChildrenStorageType children;
+        // 把 is end 压缩到 UInt32 的最高位上，免除 padding？
+        // 没有必要，ChildrenStorageType 已经够大了，而且这么做会导致复杂性和可读性都更加恶劣
         bool is_end = false;
     };
 
-    std::pmr::vector<Node> node_pool;
-    TriesFreeList<IndexType, ReuseDeadNodes> free_list;
-    std::pmr::memory_resource *memory_resource;
+    std::pmr::vector<Node> node_pool;                   // 节点内存池
+    TriesFreeList<IndexType, ReuseDeadNodes> free_list; // 空闲节点列表
+    std::pmr::memory_resource *memory_resource;         // 用户提供的内存资源
+    SizeT word_count;                                   // 单词数量统计
+
+    [[nodiscard]] SizeT size_impl() const noexcept { return word_count; }
+    [[nodiscard]] bool empty_impl() const noexcept { return word_count == 0; }
+    [[nodiscard]] SizeT active_node_count_impl() const noexcept { return node_pool.size() - free_list.size(); }
 
     IndexType create_node() {
-        if constexpr (ReuseDeadNodes) {
-            if (!free_list.empty()) {
-                IndexType reused_index = free_list.pop();
-                Node &node = node_pool[reused_index];
-                node.children.reset();
-                node.is_end = false;
-                return reused_index;
+        if constexpr (ReuseDeadNodes) {                   // 如果打算复用死亡节点
+            if (!free_list.empty()) {                     // 如果空闲节点表不为空
+                IndexType reused_index = free_list.pop(); // 弹出末尾的空闲节点对应的索引
+                Node &node = node_pool[reused_index];     // 获取索引对应的空闲节点
+                node.children.reset();                    // 重置空闲节点孩子状态
+                node.is_end = false;                      // 重置空闲节点 is end 状态
+                return reused_index;                      // 返回空闲接待你对应的索引
             }
         }
-        node_pool.emplace_back();
-        return static_cast<IndexType>(node_pool.size() - 1);
+        node_pool.emplace_back();                            // 在对象池创建一个新的节点
+        return static_cast<IndexType>(node_pool.size() - 1); // 返回新节点的索引
     }
 
     void dfs(IndexType node_index, std::string &current_word, std::vector<std::string> &result,
              SizeT limit) const noexcept {
-        if (result.size() >= limit) return;
-        const Node &node = node_pool[node_index];
-        if (node.is_end) {
-            result.push_back(current_word);
-            if (result.size() >= limit) return;
+        if (result.size() >= limit) return;       // 如果 result 已经到达 limit 直接返回
+        const Node &node = node_pool[node_index]; // 获取当前节点
+        if (node.is_end) {                        // 如果到当前节点构成完整单词
+            result.push_back(current_word);       // 往 result 中加入当前完整单词
+            if (result.size() >= limit) return;   // 再次检查 result 是否到达 limit
         }
-        if (node.children.empty()) return;
+        if (node.children.empty()) return; // 如果当前节点没有孩子，直接返回
 
         node.children.for_each_child([this, &current_word, &result, limit](UChar key, IndexType child_node_index) {
-            if (child_node_index == invalid_index) return; // defense
-            if (result.size() >= limit) return;
-            current_word.push_back(static_cast<char>(key));
-            dfs(child_node_index, current_word, result, limit);
-            current_word.pop_back();
+            if (child_node_index == invalid_index) return;      // 防御
+            if (result.size() >= limit) return;                 // 到达 limit 返回
+            current_word.push_back(static_cast<char>(key));     // 往当前单词中加入当前节点对应字符
+            dfs(child_node_index, current_word, result, limit); // 递归 dfs
+            current_word.pop_back();                            // 在当前单词弹出当前节点对应字符
         });
     }
 
     [[nodiscard]] IndexType find_node_index(std::string_view prefix) const noexcept {
-        if (node_pool.empty()) [[unlikely]]
+        if (node_pool.empty()) [[unlikely]] // 防御
             return invalid_index;
-        IndexType current_node_index = 0;
+        IndexType current_node_index = 0; // 根节点索引
         for (char ch : prefix) {
             UChar key = CastUChar(ch);
-            const Node &current_node = node_pool[current_node_index];
-            IndexType child_node_index = current_node.children.get(key);
-            if (child_node_index == invalid_index) return invalid_index;
-            current_node_index = child_node_index;
+            const Node &current_node = node_pool[current_node_index];    // 当前节点
+            IndexType child_node_index = current_node.children.get(key); // 孩子节点索引
+            if (child_node_index == invalid_index) return invalid_index; // 孩子节点不存在，返回 invalid
+            current_node_index = child_node_index;                       // 更新当前节点索引
         }
         return current_node_index;
     }
@@ -873,52 +925,59 @@ class SPmrArrayTries : public TriesBase<SPmrArrayTries<ChildrenStorageType, Reus
             UChar key = CastUChar(ch);
             // 不要使用引用，create node 会导致 reallocation
             IndexType child_node_index = node_pool[current_node_index].children.get(key);
-            if (child_node_index == invalid_index) {
-                child_node_index = create_node();
-                node_pool[current_node_index].children.set(key, child_node_index);
+            if (child_node_index == invalid_index) {                               // 如果孩子节点不存在
+                child_node_index = create_node();                                  // 创建一个孩子节点
+                node_pool[current_node_index].children.set(key, child_node_index); // 更新父节点信息
             }
             current_node_index = child_node_index;
         }
-        node_pool[current_node_index].is_end = true;
+        Node &last_node = node_pool[current_node_index];
+        if (last_node.is_end) return; // 插入的单词已经存在
+        last_node.is_end = true;
+        word_count++;
     }
 
     [[nodiscard]] bool contains_impl(std::string_view word) const noexcept {
         IndexType node_index = find_node_index(word);
-        return node_index != invalid_index && node_pool[node_index].is_end;
+        return node_index != invalid_index && node_pool[node_index].is_end; // 能找到对应节点且对应节点 is end 为真
     }
 
     bool erase_impl(std::string_view word) {
-        IndexType current_node_index = 0;
-        std::pmr::vector<std::pair<IndexType, UChar>> path(memory_resource);
+        IndexType current_node_index = 0;                                    // 根节点索引
+        std::pmr::vector<std::pair<IndexType, UChar>> path(memory_resource); // 记录删除路径 <父节点索引，孩子键>
         path.reserve(word.size());
 
         for (char ch : word) {
             UChar key = CastUChar(ch);
-            Node &current_node = node_pool[current_node_index];
-            IndexType child_node_index = current_node.children.get(key);
-            if (child_node_index == invalid_index) return false;
-            path.emplace_back(current_node_index, key);
-            current_node_index = child_node_index;
+            Node &current_node = node_pool[current_node_index];          // 当前节点
+            IndexType child_node_index = current_node.children.get(key); // 孩子节点索引
+            if (child_node_index == invalid_index) return false;         // 单词不存在，删除失败
+            path.emplace_back(current_node_index, key);                  // 新增 <当前节点，孩子键>
+            current_node_index = child_node_index;                       // 更新当前节点索引
         }
 
-        Node &terminal_node = node_pool[current_node_index];
-        if (!terminal_node.is_end) return false;
-        terminal_node.is_end = false;
-        if (!terminal_node.children.empty()) return true;
+        Node &last_node = node_pool[current_node_index]; // 单词末尾节点
+        if (!last_node.is_end) return false;             // 单词在树中不构成完整单词，删除失败
+        last_node.is_end = false;                        // 末尾节点不再为单词末尾节点
+        if (!last_node.children.empty()) {               // 末尾节点有孩子，无需进一步删除，删除成功
+            word_count--;
+            return true;
+        }
 
+        // 回溯：把所有非单词末尾且没有孩子的无效节点都删除
         for (auto it = path.rbegin(); it != path.rend(); ++it) {
-            IndexType parent_node_index = it->first;
-            UChar child_key = it->second;
-            Node &parent_node = node_pool[parent_node_index];
-            IndexType child_node_index = parent_node.children.get(child_key);
-            if (child_node_index == invalid_index) [[unlikely]]
+            IndexType parent_node_index = it->first;                          // 父节点索引
+            UChar child_key = it->second;                                     // 孩子键
+            Node &parent_node = node_pool[parent_node_index];                 // 父节点
+            IndexType child_node_index = parent_node.children.get(child_key); // 孩子节点索引
+            if (child_node_index == invalid_index) [[unlikely]]               // 防御
                 break;
-
-            const Node &child_node = node_pool[child_node_index];
-            if (child_node.is_end || !child_node.children.empty()) break;
-            parent_node.children.set(child_key, invalid_index);
-            if constexpr (ReuseDeadNodes) free_list.push(child_node_index);
+            const Node &child_node = node_pool[child_node_index];           // 孩子节点
+            if (child_node.is_end || !child_node.children.empty()) break;   // 为单词末尾或有孩子，无需进一步删除
+            parent_node.children.set(child_key, invalid_index);             // 更新父节点，删除孩子节点
+            if constexpr (ReuseDeadNodes) free_list.push(child_node_index); // 更新空闲节点列表
         }
+        word_count--;
         return true;
     }
 
@@ -933,16 +992,34 @@ class SPmrArrayTries : public TriesBase<SPmrArrayTries<ChildrenStorageType, Reus
         std::vector<std::string> result;
         result.reserve(limit == SizeMax ? 16 : limit);
         std::string current_word(prefix);
+        current_word.reserve(prefix.size() + 32);
         dfs(start_node_index, current_word, result, limit);
         return result;
     }
 
+    [[nodiscard]] std::string_view longest_prefix_of_impl(std::string_view text) {
+        IndexType current_node_index = 0; // 根节点索引
+        SizeT last_match_pos = 0;         // 最后匹配成功的位置
+        bool found = false;
+        for (SizeT i = 0; i < text.size(); ++i) {
+            UChar key = CastUChar(text[i]);
+            const Node &current_node = node_pool[current_node_index];    // 当前节点
+            IndexType child_node_index = current_node.children.get(key); // 孩子节点索引
+            if (child_node_index == invalid_index) break;                // 孩子节点不存在
+            const Node &child_node = node_pool[child_node_index];        // 孩子节点
+            current_node_index = child_node_index;
+            if (!child_node.is_end) continue;
+            last_match_pos = i + 1;
+            found = true;
+        }
+        if (!found) return {};
+        return text.substr(0, last_match_pos);
+    }
+
 public:
-    explicit SPmrArrayTries(std::pmr::memory_resource *resource)
-        : node_pool(resource), free_list(resource), memory_resource(resource) {
-        node_pool.reserve(1024);
+    explicit SPmrArrayTries(std::pmr::memory_resource *resource, SizeT initial_capacity = 1024)
+        : node_pool(resource), free_list(resource), memory_resource(resource), word_count(0) {
+        node_pool.reserve(initial_capacity);
         create_node();
     }
 };
-
-template <TriesChildrenStorage ChildrenStorageType> using SPmrArrayTriesFL = SPmrArrayTries<ChildrenStorageType, true>;
