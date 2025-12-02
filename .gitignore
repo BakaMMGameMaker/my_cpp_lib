@@ -1,6 +1,7 @@
 *
 
 # 白名单
+!*/
 !.gitignore
 !*.cpp
 !*.hpp
