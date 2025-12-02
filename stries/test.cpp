@@ -423,6 +423,19 @@ int main() {
         run_multithread_tests_kv(trie);
     }
 
+    {
+        STrieNoReuseKV trie;
+        trie.insert_or_assign("apple", 114);
+
+        trie.for_each_with_prefix("a", [](const std::string &word, int &value) {
+            if (!word.empty() && word.front() == 'a' && word.back() == 'e') {
+                value = 999; // 随便改
+            }
+        });
+
+        assert(*trie.find("apple") == 999);
+    }
+
     std::cout << "\nAll tests passed.\n";
     return 0;
 }

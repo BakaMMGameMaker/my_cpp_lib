@@ -409,6 +409,41 @@ private: // private methods
         });
     }
 
+    template <typename Func, typename T = ValueType>
+        requires(std::is_void_v<T>)
+    void dfs_for_each(IndexType node_index, std::string &current_word, Func &func) {
+        const Node &node = node_pool[node_index];
+        if (node.has_value()) func(current_word);
+        if (node.children.empty()) return;
+        node.children.for_each_child([this, &current_word, &func](UChar key, IndexType child_node_index) {
+            if (child_node_index == invalid_index) [[unlikely]]
+                return;
+            current_word.push_back(static_cast<char>(key));
+            dfs_for_each(child_node_index, current_word, func);
+            current_word.pop_back();
+        });
+    }
+
+    template <typename Func, typename T = ValueType>
+        requires(!std::is_void_v<T>)
+    void dfs_for_each(IndexType node_index, std::string &current_word, Func &func) {
+        Node &node = node_pool[node_index];
+
+        // 如果当前节点有值，则调用用户 func
+        if (node.has_value()) func(current_word, node.value.value());
+
+        // 当前节点没有孩子，不用再递归
+        if (node.children.empty()) return;
+
+        node.children.for_each_child([this, &current_word, &func](UChar key, IndexType child_node_index) {
+            if (child_node_index == invalid_index) [[unlikely]]
+                return;
+            current_word.push_back(static_cast<char>(key));
+            dfs_for_each(child_node_index, current_word, func);
+            current_word.pop_back();
+        });
+    }
+
     // 找到 prefix 中最后一个字符对应的节点，返回其索引
     [[nodiscard]] IndexType find_node_index(std::string_view prefix) const noexcept {
         if (node_pool.empty()) [[unlikely]] // 防御
@@ -769,6 +804,28 @@ public: // public interface
         const Node &node = node_pool[node_index];
         if (!node.has_value()) return nullptr;
         return node.value ? std::addressof(*(node.value)) : nullptr;
+    }
+
+    template <typename Func, typename T = ValueType>
+        requires(std::is_void_v<T>)
+    void for_each_with_prefix(std::string_view prefix, Func &&func) {
+        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+        IndexType start_node_index = find_node_index(prefix);
+        if (start_node_index == invalid_index) return;
+
+        std::string current_word(prefix);
+        dfs_for_each(start_node_index, current_word, func);
+    }
+
+    template <typename Func, typename T = ValueType>
+        requires(!std::is_void_v<T>)
+    void for_each_with_prefix(std::string_view prefix, Func &&func) {
+        std::unique_lock<std::shared_mutex> write_lock(shared_mutex); // 回调可能有写行为
+        IndexType start_node_index = find_node_index(prefix);
+        if (start_node_index == invalid_index) return;
+
+        std::string current_word(prefix);
+        dfs_for_each(start_node_index, current_word, func);
     }
 
     explicit STrie(std::pmr::memory_resource *resource = std::pmr::get_default_resource(),
