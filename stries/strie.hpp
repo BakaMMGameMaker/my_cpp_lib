@@ -7,8 +7,10 @@
 #include <ios>
 #include <istream>
 #include <limits>
+#include <memory>
 #include <memory_resource>
 #include <mutex>
+#include <optional>
 #include <ostream>
 #include <queue>
 #include <shared_mutex>
@@ -16,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 // 搜索结果返回类型概念约束
@@ -29,6 +32,19 @@ concept PrefixSearchResult = requires(R r) {
 template <typename F>
 concept ScoreFunc = requires(F f, std::string_view sv) {
     { f(sv) } -> std::convertible_to<SizeT>;
+};
+
+// 节点 ValueType = void 时仅存储 is_end，非 void 时存储 std::optional<ValueType>
+template <typename ValueType> struct TrieNodeBase {
+    std::optional<ValueType> value; // 有值相当于 is_end
+    void reset() noexcept { value.reset(); }
+    bool has_value() const noexcept { return value.has_value(); }
+};
+
+template <> struct TrieNodeBase<void> {
+    bool is_end = false;
+    void reset() noexcept { is_end = false; }
+    bool has_value() const noexcept { return is_end; }
 };
 
 // Tries 树概念约束
@@ -52,20 +68,20 @@ concept Tries = requires(T t, const T ct, std::string_view sv, SizeT limit) {
  * @brief 允许用户提供 memory resource ，指定节点中存储孩子的数据结构，是否复用内存池中死亡的节点
  * @tparam ChildrenStorageType 节点中存储孩子的数据结构
  * @tparam ReuseDeadNodes 是否复用内存池中的死亡节点，启用可以节省内存，但降低缓存命中率
+ * @tparam ValueType 值类型
  */
-template <TriesChildrenStorage ChildrenStorageType, bool ReuseDeadNodes = false> class STrie {
+template <TriesChildrenStorage ChildrenStorageType, bool ReuseDeadNodes = false, typename ValueType = void>
+class STrie {
 
     using IndexType = UInt32;
+    using NodeBase = TrieNodeBase<ValueType>;
 
     static constexpr IndexType invalid_index = std::numeric_limits<UInt32>::max();
     static constexpr UInt32 k_magic = 0x53545249; // 文件头标识
     static constexpr UInt32 k_version = 1;        // 版本号
 
-    struct Node {
+    struct Node : NodeBase {
         ChildrenStorageType children;
-        // 把 is end 压缩到 UInt32 的最高位上，免除 padding？
-        // 没有必要，ChildrenStorageType 已经够大了，而且这么做会导致复杂性和可读性都更加恶劣
-        bool is_end = false;
 
         // emplace_back() 时被使用
         Node() = default;
@@ -73,12 +89,19 @@ template <TriesChildrenStorage ChildrenStorageType, bool ReuseDeadNodes = false>
         // emplace_back(memory_resource) 时被使用
         explicit Node(std::pmr::memory_resource *resource)
             requires std::is_constructible_v<ChildrenStorageType, std::pmr::memory_resource *>
-            : children(resource), is_end(false) {}
+            : NodeBase(), children(resource) {}
 
-        void reset() noexcept {
+        // 清空孩子并重置 is_end / value
+        void reset_node() noexcept {
             children.reset();
-            is_end = false;
+            reset_value();
         }
+
+        // 仅重置 is_end / value
+        void reset_value() noexcept { NodeBase::reset(); }
+
+        // 替代 is_end
+        bool has_value() const noexcept { return NodeBase::has_value(); }
     };
 
     // TODO：deque 版本，但考虑到 deque 版本缓存比较不友好，暂时不考虑，更倾向于一次性 reserve 足够空间
@@ -130,7 +153,7 @@ private:
              SizeT limit) const noexcept {
         if (result.size() >= limit) return;       // 如果 result 已经到达 limit 直接返回
         const Node &node = node_pool[node_index]; // 获取当前节点
-        if (node.is_end) {                        // 如果到当前节点构成完整单词
+        if (node.has_value()) {                   // 如果到当前节点构成完整单词
             result.push_back(current_word);       // 往 result 中加入当前完整单词
             if (result.size() >= limit) return;   // 再次检查 result 是否到达 limit
         }
@@ -145,6 +168,27 @@ private:
         });
     }
 
+    template <typename T = ValueType>
+        requires(!std::is_void_v<T>)
+    void dfs_with_value(IndexType node_index, std::string &current_word, std::vector<std::pair<std::string, T>> &result,
+                        SizeT limit) const {
+        if (result.size() >= limit) return;
+        const Node &node = node_pool[node_index];
+        if (node.has_value()) {
+            result.emplace_back(current_word, *node.value);
+            if (result.size() >= limit) return;
+        }
+        if (node.children.empty()) return;
+
+        node.children.for_each_child([this, &current_word, &result, limit](UChar key, IndexType child_node_index) {
+            if (child_node_index == invalid_index) return;
+            if (result.size() >= limit) return;
+            current_word.push_back(static_cast<char>(key));
+            dfs_with_value(child_node_index, current_word, result, limit);
+            current_word.pop_back();
+        });
+    }
+
     // 深度优先搜索维护 Top-K
     template <ScoreFunc ScoreFuncType, typename HeapType>
     void dfs_with_score(IndexType node_index, std::string &current_word, HeapType &heap, SizeT limit,
@@ -154,7 +198,7 @@ private:
         using ScoredWord = std::pair<std::string, ScoreType>;
 
         const Node &node = node_pool[node_index]; // 当前节点
-        if (node.is_end) {
+        if (node.has_value()) {
             ScoreType score = score_func(std::string_view(current_word));
             if (heap.size() < limit) {
                 heap.push(ScoredWord{current_word, score}); // 还没装满堆
@@ -166,8 +210,38 @@ private:
         }
 
         node.children.for_each_child([&](UChar key, IndexType child_node_index) {
+            if (child_node_index == invalid_index) return;
             current_word.push_back(static_cast<char>(key));
             dfs_with_score(child_node_index, current_word, heap, limit, score_func);
+            current_word.pop_back();
+        });
+    }
+
+    template <ScoreFunc ScoreFuncType, typename HeapType, typename T = ValueType>
+        requires(!std::is_void_v<T>)
+    void dfs_with_score_value(IndexType node_index, std::string &current_word, HeapType &heap, SizeT limit,
+                              ScoreFuncType &score_func) const {
+
+        using ScoreType = std::invoke_result_t<ScoreFuncType &, std::string_view>;
+        using KVType = std::pair<std::string, T>;
+        using ScoredWord = std::pair<KVType, ScoreType>;
+
+        const Node &node = node_pool[node_index]; // 当前节点
+        if (node.has_value()) {
+            ScoreType score = score_func(std::string_view(current_word));
+            if (heap.size() < limit) {
+                heap.push(ScoredWord{KVType{current_word, *node.value}, score}); // 还没装满堆
+            } else if (!heap.empty() && score > heap.top().second) {
+                // 仅在分数高于当前堆顶分数时进堆
+                heap.pop();
+                heap.push(ScoredWord{KVType{current_word, *node.value}, score});
+            }
+        }
+
+        node.children.for_each_child([&](UChar key, IndexType child_node_index) {
+            if (child_node_index == invalid_index) return;
+            current_word.push_back(static_cast<char>(key));
+            dfs_with_score_value(child_node_index, current_word, heap, limit, score_func);
             current_word.pop_back();
         });
     }
@@ -187,6 +261,8 @@ private:
         return current_node_index;
     }
 
+    template <typename T = ValueType>
+        requires(std::is_void_v<T>)
     void push_without_lock(std::string_view word) {
         IndexType current_node_index = 0;
         for (char ch : word) {
@@ -200,8 +276,9 @@ private:
             current_node_index = child_node_index;
         }
         Node &last_node = node_pool[current_node_index];
-        if (last_node.is_end) return; // 插入的单词已经存在
-        last_node.is_end = true;
+        if (last_node.has_value()) return; // 插入的单词已经存在
+        static_cast<NodeBase &>(last_node).is_end = true;
+        // last_node.is_end = true;
         word_count++;
     }
 
@@ -214,6 +291,8 @@ private:
 
 public:
     // 添加新的单词
+    template <typename T = ValueType>
+        requires(std::is_void_v<T>)
     void push(std::string_view word) {
         std::unique_lock<std::shared_mutex> write_lock(shared_mutex);
         push_without_lock(word);
@@ -236,9 +315,10 @@ public:
         }
 
         Node &last_node = node_pool[current_node_index]; // 单词末尾节点
-        if (!last_node.is_end) return false;             // 单词在树中不构成完整单词，删除失败
-        last_node.is_end = false;                        // 末尾节点不再为单词末尾节点
-        if (!last_node.children.empty()) {               // 末尾节点有孩子，无需进一步删除，删除成功
+        if (!last_node.has_value()) return false;        // 单词在树中不构成完整单词，删除失败
+        // last_node.reset(); // bug
+        last_node.reset_value();           // 末尾节点不再为单词末尾节点
+        if (!last_node.children.empty()) { // 末尾节点有孩子，无需进一步删除，删除成功
             word_count--;
             return true;
         }
@@ -251,10 +331,10 @@ public:
             IndexType child_node_index = parent_node.children.get(child_key); // 孩子节点索引
             if (child_node_index == invalid_index) [[unlikely]]               // 防御
                 break;
-            const Node &child_node = node_pool[child_node_index];           // 孩子节点
-            if (child_node.is_end || !child_node.children.empty()) break;   // 为单词末尾或有孩子，无需进一步删除
-            parent_node.children.set(child_key, invalid_index);             // 更新父节点，删除孩子节点
-            if constexpr (ReuseDeadNodes) free_list.push(child_node_index); // 更新空闲节点列表
+            const Node &child_node = node_pool[child_node_index];              // 孩子节点
+            if (child_node.has_value() || !child_node.children.empty()) break; // 为单词末尾或有孩子，无需进一步删除
+            parent_node.children.set(child_key, invalid_index);                // 更新父节点，删除孩子节点
+            if constexpr (ReuseDeadNodes) free_list.push(child_node_index);    // 更新空闲节点列表
         }
         word_count--;
         return true;
@@ -264,7 +344,8 @@ public:
     [[nodiscard]] bool contains(std::string_view word) const noexcept {
         std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
         IndexType node_index = find_node_index(word);
-        return node_index != invalid_index && node_pool[node_index].is_end; // 能找到对应节点且对应节点 is end 为真
+        // 能找到对应节点且对应节点 has value
+        return node_index != invalid_index && node_pool[node_index].has_value();
     }
 
     // 查找是否包含以给定 prefix 为前缀的单词
@@ -307,7 +388,9 @@ public:
         auto cmp = [](const ScoredWord &lhs, const ScoredWord &rhs) { return lhs.second > rhs.second; }; // 小根堆
         std::priority_queue<ScoredWord, std::vector<ScoredWord>, decltype(cmp)> heap(cmp);
 
-        NoRefScoreFuncType local_score_func = std::forward<ScoreFuncType>(score_func);
+        // 获取一个本地左值副本，用于在 dfs 中递归
+        NoRefScoreFuncType local_score_func =
+            std::forward<ScoreFuncType>(score_func); // 如果是左值，拷贝一份到本地，如果是右值，move 到本地
 
         std::string current_word(prefix);
         dfs_with_score(start_node_index, current_word, heap, limit, local_score_func);
@@ -324,12 +407,68 @@ public:
         return result;
     }
 
+    // 获取最多 limit 个以 prefix 为前缀的单词和它们的值
+    template <typename T = ValueType>
+        requires(!std::is_void_v<T>)
+    [[nodiscard]] std::vector<std::pair<std::string, T>> prefix_search_with_value(std::string_view prefix,
+                                                                                  SizeT limit = SizeMax) const {
+        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+        if (limit == 0) return {};
+
+        IndexType start_node_index = find_node_index(prefix);
+        if (start_node_index == invalid_index) return {};
+
+        std::vector<std::pair<std::string, T>> result;
+        result.reserve(limit == SizeMax ? 16 : limit);
+        std::string current_word(prefix);
+        current_word.reserve(prefix.size() + 32);
+        dfs_with_value(start_node_index, current_word, result, limit);
+        return result;
+    }
+
+    // 获取最多 limit 个以 prefix 为前缀的单词和它们的值，以传入方法计算单词分数，结果由高到低排列
+    template <ScoreFunc ScoreFuncType, typename T = ValueType>
+        requires(!std::is_void_v<T>)
+    [[nodiscard]] std::vector<std::pair<std::string, T>>
+    prefix_search_with_value(std::string_view prefix, ScoreFuncType &&score_func, SizeT limit = SizeMax) const {
+        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+        using NoRefScoreFuncType = std::remove_reference_t<ScoreFuncType>;
+        using ScoreType = std::invoke_result_t<NoRefScoreFuncType &, std::string_view>;
+        using KVType = std::pair<std::string, T>;
+        using ScoredWord = std::pair<KVType, ScoreType>;
+
+        if (limit == 0) return {};
+
+        IndexType start_node_index = find_node_index(prefix);
+        if (start_node_index == invalid_index) return {};
+
+        auto cmp = [](const ScoredWord &lhs, const ScoredWord &rhs) { return lhs.second > rhs.second; };
+        std::priority_queue<ScoredWord, std::vector<ScoredWord>, decltype(cmp)> heap(cmp);
+
+        // 获取一个本地左值副本，用于在 dfs 中递归
+        NoRefScoreFuncType local_score_func =
+            std::forward<ScoreFuncType>(score_func); // 如果是左值，拷贝一份到本地，如果是右值，move 到本地
+
+        std::string current_word(prefix);
+        dfs_with_score_value(start_node_index, current_word, heap, limit, local_score_func);
+
+        if (heap.empty()) return {};
+
+        std::vector<KVType> result;
+        result.reserve(heap.size());
+        while (!heap.empty()) {
+            result.push_back(std::move(heap.top().first));
+            heap.pop();
+        }
+        std::reverse(result.begin(), result.end());
+        return result;
+    }
+
     // 获取给定文本的所有前缀中在树中存在且作为完整单词的最长结果
     [[nodiscard]] std::string_view longest_prefix_of(std::string_view text) const {
         std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
         IndexType current_node_index = 0; // 根节点索引
         SizeT last_match_pos = 0;         // 最后匹配成功的位置
-        bool found = false;
         for (SizeT i = 0; i < text.size(); ++i) {
             UChar key = CastUChar(text[i]);
             const Node &current_node = node_pool[current_node_index];    // 当前节点
@@ -337,12 +476,10 @@ public:
             if (child_node_index == invalid_index) break;                // 孩子节点不存在
             const Node &child_node = node_pool[child_node_index];        // 孩子节点
             current_node_index = child_node_index;
-            if (!child_node.is_end) continue;
-            last_match_pos = i + 1;
-            found = true;
+            if (!child_node.has_value()) continue;
+            last_match_pos = i + 1; // 哪怕匹配过一次，last match pos 也不会是 0
         }
-        if (!found) return {};
-        return text.substr(0, last_match_pos);
+        return text.substr(0, last_match_pos); // last match pos = 0 代表没有匹配到任何完整前缀，此时返回空串
     }
 
     void clear() noexcept {
@@ -352,8 +489,11 @@ public:
 
     // 将 Trie 序列化到输出流
     // [uint32 magic][uint32 version][uint64 word_count]
-    // 重复 word_count 次：[uint64 len][len 字节的字符数据（不含'\0'）]
+    // 重复 word_count 次：[uint64 len][len 字节的字符数据]
+    template <typename T = ValueType>
+        requires(std::is_void_v<T>)
     void serialize(std::ostream &os) const {
+
         std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
 
         // 写入文件头
@@ -386,6 +526,8 @@ public:
     }
 
     // 反序列化覆盖当前 Trie 内容
+    template <typename T = ValueType>
+        requires(std::is_void_v<T>)
     void deserialize(std::istream &is) {
         std::unique_lock<std::shared_mutex> write_lock(shared_mutex);
 
@@ -418,6 +560,52 @@ public:
             if (!is) throw std::runtime_error("STrie::deserialize: failed to read word bytes");
             push_without_lock(word);
         }
+    }
+
+    // 插入或者覆盖 key 对应的 value，返回 true 代表新 key，false 代表覆盖已有 key 值
+    template <typename V>
+        requires(!std::is_void_v<ValueType> &&
+                 std::is_constructible_v<ValueType, V &&>) // 确保 ValueType 以传进来的类型构造（左值/右值）
+    bool insert_or_assign(std::string_view word, V &&value) {
+        std::unique_lock<std::shared_mutex> write_lock(shared_mutex);
+        IndexType current_node_index = 0;
+        for (char ch : word) {
+            UChar key = CastUChar(ch);
+            IndexType child_node_index = node_pool[current_node_index].children.get(key);
+            if (child_node_index == invalid_index) {
+                child_node_index = create_node();
+                node_pool[current_node_index].children.set(key, child_node_index);
+            }
+            current_node_index = child_node_index;
+        }
+        Node &last_node = node_pool[current_node_index];
+        const bool is_new_key = !last_node.has_value();
+        if (is_new_key) last_node.value.emplace(std::forward<V>(value)); // optional 的 emplace 方法
+        else last_node.value = std::forward<V>(value);
+        word_count += is_new_key; // 更新单词计数
+        return is_new_key;
+    }
+
+    template <typename T = ValueType>
+        requires(!std::is_void_v<T>)
+    [[nodiscard]] T *find(std::string_view word) noexcept {
+        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+        IndexType node_index = find_node_index(word);
+        if (node_index == invalid_index) return nullptr;
+        Node &node = node_pool[node_index];
+        if (!node.has_value()) return nullptr;
+        return node.value ? std::addressof(*(node.value)) : nullptr; // *optional 以获得内部的 T value
+    }
+
+    template <typename T = ValueType>
+        requires(!std::is_void_v<T>)
+    [[nodiscard]] const T *find(std::string_view word) const noexcept {
+        std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
+        IndexType node_index = find_node_index(word);
+        if (node_index == invalid_index) return nullptr;
+        const Node &node = node_pool[node_index];
+        if (!node.has_value()) return nullptr;
+        return node.value ? std::addressof(*(node.value)) : nullptr;
     }
 
     explicit STrie(std::pmr::memory_resource *resource = std::pmr::get_default_resource(),

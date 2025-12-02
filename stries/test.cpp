@@ -1,8 +1,9 @@
-// test_tries.cpp
+// test.cpp
 #include "salias.h"
 #include "strie.hpp"
 #include "stries_children_storage.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <fstream>
 #include <iostream>
@@ -11,17 +12,22 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 using STrieNoReuse = STrie<HybridDynamicChildren<UInt32, 256, 16>, false>;
 using STrieWithReuse = STrie<HybridDynamicChildren<UInt32, 256, 16>, true>;
+using STrieNoReuseKV = STrie<HybridDynamicChildren<UInt32, 256, 16>, false, int>;
+using STrieWithReuseKV = STrie<HybridDynamicChildren<UInt32, 256, 16>, true, int>;
 
-// 简单工具：检查某个 vector 是否包含指定元素
+static const std::vector<std::string> kWords{
+    "app", "apple", "apply", "banana", "band", "bandana", "cat", "car", "dog",
+};
+
 static bool contains(const std::vector<std::string> &v, std::string_view s) {
     return std::find(v.begin(), v.end(), s) != v.end();
 }
 
-// 打印一个字符串数组（方便调试）
 static void print_vector(std::string_view title, const std::vector<std::string> &v) {
     std::cout << title << " [size = " << v.size() << "]: ";
     for (const auto &s : v) { std::cout << '"' << s << "\" "; }
@@ -37,15 +43,13 @@ template <Tries TrieType> void run_basic_tests(TrieType &trie) {
     assert(trie.active_node_count() >= 1); // 至少有根节点
 
     // 插入一些单词
-    const std::vector<std::string> words{"app", "apple", "apply", "banana", "band", "bandana", "cat", "car", "dog"};
-
-    for (const auto &w : words) { trie.push(w); }
+    for (const auto &w : kWords) { trie.push(w); }
 
     assert(!trie.empty());
-    assert(trie.size() == words.size());
+    assert(trie.size() == kWords.size());
 
     // contains 测试
-    for (const auto &w : words) { assert(trie.contains(w)); }
+    for (const auto &w : kWords) { assert(trie.contains(w)); }
     assert(!trie.contains("ape"));
     assert(!trie.contains("ban")); // 前缀不是完整单词
 
@@ -130,30 +134,187 @@ template <Tries TrieType> void run_basic_tests(TrieType &trie) {
         assert(!erased_again);
 
         // size 少了一个
-        assert(trie.size() == words.size() - 1);
+        assert(trie.size() == kWords.size() - 1);
     }
 
     std::cout << "[OK] erase / word_count\n";
     std::cout << "active_node_count = " << trie.active_node_count() << "\n";
 }
 
-int main() {
-    std::pmr::monotonic_buffer_resource mr;
+// 多线程测试（ValueType = void），测读写锁是否稳当
+template <typename TrieType> void run_multithread_tests_void(TrieType &trie) {
+    std::cout << "===== Multithread tests (void) =====\n";
 
+    // 预热：插入一批单词，避免线程一启动就疯狂触发扩容，
+    for (int i = 0; i < 1000; ++i) { trie.push("warmup_" + std::to_string(i)); }
+
+    std::atomic<bool> stop{false};
+
+    auto reader_task = [&]() {
+        while (!stop.load(std::memory_order_relaxed)) {
+            (void)trie.contains("apple");
+            (void)trie.contains_starts_with("ban");
+            (void)trie.prefix_search("app", 8);
+            (void)trie.longest_prefix_of("application");
+        }
+    };
+
+    auto writer_task = [&]() {
+        for (int i = 0; i < 2000; ++i) {
+            trie.push("tword_" + std::to_string(i));
+            if (i % 3 == 0) { trie.erase("tword_" + std::to_string(i / 2)); }
+        }
+    };
+
+    std::thread r1(reader_task);
+    std::thread r2(reader_task);
+    std::thread r3(reader_task);
+    std::thread w1(writer_task);
+    std::thread w2(writer_task);
+
+    w1.join();
+    w2.join();
+    stop.store(true, std::memory_order_relaxed);
+    r1.join();
+    r2.join();
+    r3.join();
+
+    // 简单 sanity check：随便查几个单词，确保调用没炸
+    assert(trie.contains_starts_with("app"));
+    (void)trie.prefix_search("tword_", 5);
+
+    std::cout << "[OK] multithread (void)\n";
+}
+
+// 有值版本测试：insert_or_assign / find / prefix_search_with_value
+template <typename KVTrie> void run_kv_tests(KVTrie &trie) {
+    std::cout << "===== KV basic tests =====\n";
+
+    assert(trie.empty());
+    assert(trie.size() == 0);
+
+    bool is_new = trie.insert_or_assign("app", 1);
+    assert(is_new);
+    assert(trie.size() == 1);
+
+    // 覆盖已有 key
+    is_new = trie.insert_or_assign("app", 2);
+    assert(!is_new);
+    assert(trie.size() == 1);
+
+    // 再插入几个
+    trie.insert_or_assign("apple", 3);
+    trie.insert_or_assign("apply", 4);
+    trie.insert_or_assign("banana", 5);
+    trie.insert_or_assign("band", 6);
+    trie.insert_or_assign("bandana", 7);
+
+    assert(!trie.empty());
+    assert(trie.size() == 6); // "app" + "apple" + "apply" + "banana" + "band" + "bandana"
+
+    // find / const find
     {
-        std::cout << "===== STries<HybridDynamicChildren, false> =====\n";
-        STrieNoReuse trie(&mr, 128);
-        run_basic_tests(trie);
+        int *p = trie.find("app");
+        assert(p && *p == 2);
+        *p = 42; // 通过非 const 指针改值
+
+        const auto &ctrie = trie;
+        const int *cp = ctrie.find("app");
+        assert(cp && *cp == 42);
+
+        assert(trie.find("zzz") == nullptr);
+        assert(ctrie.find("zzz") == nullptr);
     }
 
+    // prefix_search_with_value
     {
-        std::cout << "\n===== STries<HybridDynamicChildren, true> =====\n";
-        STrieWithReuse trie(&mr, 128);
-        run_basic_tests(trie);
+        auto res = trie.prefix_search_with_value("app");
+        std::cout << "prefix_search_with_value(\"app\") [size = " << res.size() << "]: ";
+        for (auto &kv : res) { std::cout << "(\"" << kv.first << "\", " << kv.second << ") "; }
+        std::cout << "\n";
+
+        assert(res.size() >= 3);
     }
 
+    // 带 ScoreFunc 的 prefix_search_with_value：长度越短分越高
     {
-        STrieNoReuse trie(&mr, 128);
+        auto score = [](std::string_view s) noexcept { return static_cast<int>(100 - s.size()); };
+
+        auto top2 = trie.prefix_search_with_value("ban", score, 2);
+        std::cout << "prefix_search_with_value(\"ban\", score, limit=2) [size = " << top2.size() << "]: ";
+        for (auto &kv : top2) { std::cout << "(\"" << kv.first << "\", " << kv.second << ") "; }
+        std::cout << "\n";
+
+        assert(!top2.empty());
+        for (const auto &kv : top2) { assert(kv.first.rfind("ban", 0) == 0); }
+    }
+
+    // erase 也要在 ValueType != void 时正常工作
+    {
+        bool erased = trie.erase("band");
+        assert(erased);
+        assert(!trie.contains("band"));
+        assert(trie.contains("bandana"));
+
+        bool erased_again = trie.erase("band");
+        assert(!erased_again);
+    }
+
+    std::cout << "[OK] KV basic tests\n";
+}
+
+// 有值版本的多线程测试：writer 用 insert_or_assign，reader 用 find / prefix_search_with_value
+template <typename KVTrie> void run_multithread_tests_kv(KVTrie &trie) {
+    std::cout << "===== Multithread tests (KV) =====\n";
+
+    // 预热几条记录
+    trie.insert_or_assign("base_app", 1);
+    trie.insert_or_assign("base_apple", 2);
+    trie.insert_or_assign("base_banana", 3);
+
+    std::atomic<bool> stop{false};
+
+    auto reader_task = [&]() {
+        while (!stop.load(std::memory_order_relaxed)) {
+            (void)trie.find("base_app");
+            (void)trie.prefix_search_with_value("base", 8);
+        }
+    };
+
+    auto writer_task = [&]() {
+        for (int i = 0; i < 2000; ++i) {
+            trie.insert_or_assign("kv_" + std::to_string(i), i);
+            if (i % 5 == 0) { trie.erase("kv_" + std::to_string(i / 2)); }
+        }
+    };
+
+    std::thread r1(reader_task);
+    std::thread r2(reader_task);
+    std::thread w1(writer_task);
+    std::thread w2(writer_task);
+
+    w1.join();
+    w2.join();
+    stop.store(true, std::memory_order_relaxed);
+    r1.join();
+    r2.join();
+
+    // 简单 sanity check
+    const auto &ctrie = trie;
+    const int *cp = ctrie.find("base_app");
+    assert(cp != nullptr);
+
+    std::cout << "[OK] multithread (KV)\n";
+}
+
+// 序列化 / 反序列化测试（仅 ValueType = void）
+void run_serialize_tests(std::pmr::memory_resource *mr) {
+    std::cout << "===== serialize / deserialize tests (void) =====\n";
+
+    {
+        STrieNoReuse trie(mr, 128);
+        for (const auto &w : kWords) { trie.push(w); }
+
         std::ofstream ofs("trie.bin", std::ios::binary);
         if (!ofs) throw std::runtime_error("failed to open file for write");
         trie.serialize(ofs);
@@ -162,8 +323,51 @@ int main() {
     {
         std::ifstream ifs("trie.bin", std::ios::binary);
         if (!ifs) throw std::runtime_error("failed to open file for read");
-        STrieNoReuse trie(&mr, 128);
+        STrieNoReuse trie(mr, 128);
         trie.deserialize(ifs);
+
+        // 验证几个典型单词
+        assert(trie.contains("app"));
+        assert(trie.contains("apple"));
+        assert(trie.contains("banana"));
+        assert(!trie.contains("zzz"));
+    }
+
+    std::cout << "[OK] serialize / deserialize\n";
+}
+
+int main() {
+    std::pmr::monotonic_buffer_resource mr;
+
+    {
+        std::cout << "===== STrie<HybridDynamicChildren, false, void> =====\n";
+        STrieNoReuse trie(&mr, 128);
+        run_basic_tests(trie);
+        run_multithread_tests_void(trie);
+    }
+
+    {
+        std::cout << "\n===== STrie<HybridDynamicChildren, true, void> =====\n";
+        STrieWithReuse trie(&mr, 128);
+        run_basic_tests(trie);
+        run_multithread_tests_void(trie);
+    }
+
+    // 序列化 / 反序列化
+    run_serialize_tests(&mr);
+
+    {
+        std::cout << "\n===== STrie<HybridDynamicChildren, false, int> (KV) =====\n";
+        STrieNoReuseKV trie(&mr, 128);
+        run_kv_tests(trie);
+        run_multithread_tests_kv(trie);
+    }
+
+    {
+        std::cout << "\n===== STrie<HybridDynamicChildren, true, int> (KV) =====\n";
+        STrieWithReuseKV trie(&mr, 128);
+        run_kv_tests(trie);
+        run_multithread_tests_kv(trie);
     }
 
     std::cout << "\nAll tests passed.\n";
