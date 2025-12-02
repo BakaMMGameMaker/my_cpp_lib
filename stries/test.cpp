@@ -226,6 +226,59 @@ template <typename KVTrie> void run_kv_tests(KVTrie &trie) {
         assert(ctrie.find("zzz") == nullptr);
     }
 
+    // 迭代器遍历 / const_迭代器 / 引用语义测试
+    {
+        // 非 const iterator：遍历所有键
+        std::vector<std::string> keys;
+        for (auto it = trie.begin(); it != trie.end(); ++it) {
+            auto kv = *it; // kv.second 是对内部值的引用（T&）
+            keys.push_back(kv.first);
+        }
+
+        std::sort(keys.begin(), keys.end());
+        std::vector<std::string> expected{
+            "app", "apple", "apply", "banana", "band", "bandana",
+        };
+        std::sort(expected.begin(), expected.end());
+        assert(keys == expected);
+
+        {
+            auto it = trie.begin();
+            auto end_it = trie.end();
+            bool found = false;
+            for (; it != end_it; ++it) {
+                auto kv = *it;
+                if (kv.first == "app") {
+                    found = true;
+                    break;
+                }
+            }
+            assert(found);
+        }
+
+        // const_iterator：只读遍历
+        {
+            const auto &ctrie = trie;
+            std::vector<std::string> ckeys;
+            for (auto it = ctrie.begin(); it != ctrie.end(); ++it) {
+                auto kv = *it; // pair<string, const int&>
+                ckeys.push_back(kv.first);
+            }
+            std::sort(ckeys.begin(), ckeys.end());
+            assert(ckeys == expected);
+        }
+    }
+
+    // prefix_search_with_value
+    {
+        auto res = trie.prefix_search_with_value("app");
+        std::cout << "prefix_search_with_value(\"app\") [size = " << res.size() << "]: ";
+        for (auto &kv : res) { std::cout << "(\"" << kv.first << "\", " << kv.second << ") "; }
+        std::cout << "\n";
+
+        assert(res.size() >= 3);
+    }
+
     // prefix_search_with_value
     {
         auto res = trie.prefix_search_with_value("app");

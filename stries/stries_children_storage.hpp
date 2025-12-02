@@ -5,6 +5,7 @@
 #include <array>
 #include <memory>
 #include <memory_resource>
+#include <utility>
 #include <vcruntime_new.h>
 
 // ForEachChildCallable 概念约束：需要能以 (SizeT, IndexType) 的形式被调用
@@ -25,11 +26,69 @@ concept TriesChildrenStorage =
         {
             const_storage.for_each_child([](UChar, UInt32) {}) // 需要提供接口，使用传入的函数对象处理所有孩子节点
         } -> std::same_as<void>;
+
+        typename ChildrenStorageType::ChildEntry;
+        typename ChildrenStorageType::ConstChildIterator;
+        { const_storage.child_begin() } -> std::same_as<typename ChildrenStorageType::ConstChildIterator>;
+        { const_storage.child_end() } -> std::same_as<typename ChildrenStorageType::ConstChildIterator>;
+        {
+            ++std::declval<typename ChildrenStorageType::ConstChildIterator &>() // Iterator 需要操作左值，返回左值
+        } -> std::same_as<typename ChildrenStorageType::ConstChildIterator &>;
+        {
+            *std::declval<typename ChildrenStorageType::ConstChildIterator>()
+        } -> std::same_as<typename ChildrenStorageType::ChildEntry>;
     };
 
 // 仅用 array<Capacity> 来存储孩子节点，性能最高，但内存占用固定，开销较大
-template <typename IndexType, SizeT Capacity> struct FixedChildren {
+template <typename IndexType = UInt32, SizeT Capacity = 256> struct FixedChildren {
+
+    using ChildEntry = std::pair<UChar, IndexType>;
+
     static constexpr IndexType invalid_index = std::numeric_limits<IndexType>::max();
+
+    struct ConstChildIterator {
+        const FixedChildren *parent = nullptr;
+        SizeT pos = 0; // 在 [0 - Capacity] 上移动
+
+        ConstChildIterator() noexcept = default;
+
+        ConstChildIterator(const FixedChildren *p, SizeT start) noexcept : parent(p), pos(start) { skip_to_valid(); }
+
+        void skip_to_valid() noexcept {
+            if (!parent) return;
+            while (pos < Capacity && parent->children[pos] == invalid_index) pos++;
+        }
+
+        ChildEntry operator*() const noexcept { return ChildEntry{CastUChar(pos), parent->children[pos]}; }
+
+        ConstChildIterator &operator++() noexcept {
+            pos++;
+            skip_to_valid();
+            return *this;
+        }
+
+        ConstChildIterator operator++(int) noexcept {
+            ConstChildIterator tmp = *this;
+            ++(*this);
+            return tmp;
+        }
+
+        friend bool operator==(const ConstChildIterator &lhs, const ConstChildIterator &rhs) noexcept {
+            return lhs.parent == rhs.parent && lhs.pos == rhs.pos;
+        }
+
+        friend bool operator!=(const ConstChildIterator &lhs, const ConstChildIterator &rhs) noexcept {
+            return !(lhs == rhs);
+        }
+    };
+
+    // 获取指向第一个活跃 entry 的 const iterator
+    [[nodiscard]] ConstChildIterator child_begin() const noexcept {
+        return ConstChildIterator(this, active_count ? 0 : Capacity);
+    }
+
+    // 获取指向最后一个位置的下一个位置的 const iterator
+    [[nodiscard]] ConstChildIterator child_end() const noexcept { return ConstChildIterator(this, Capacity); }
 
     std::array<IndexType, Capacity> children;
     SizeT active_count; // 活跃的孩子个数
@@ -218,8 +277,11 @@ struct [[deprecated("HybridFixedChildren is deprecated, use HybridDynamicChildre
 };
 
 // 子节点数量少时使用 array<Threshold> 存储节点，仅在需要时扩展更多空间，内存友好，性能较高
-template <typename IndexType, SizeT Capacity, SizeT Threshold, bool AllowShrinkToSparse = false>
+template <typename IndexType = UInt32, SizeT Capacity = 256, SizeT Threshold = 16, bool AllowShrinkToSparse = false>
 struct HybridDynamicChildren {
+
+    using ChildEntry = std::pair<UChar, IndexType>;
+
     static constexpr IndexType invalid_index = std::numeric_limits<IndexType>::max();
 
     struct Entry {
@@ -236,6 +298,71 @@ struct HybridDynamicChildren {
             else ::operator delete[](ptr);
         }
     };
+
+    struct ConstChildIterator {
+        const HybridDynamicChildren *parent = nullptr;
+        SizeT pos = 0;
+        bool on_dense = false; // true: 遍历 dense，false: 遍历 entries
+
+        ConstChildIterator() = default;
+
+        ConstChildIterator(const HybridDynamicChildren *p, SizeT start, bool use_dense) noexcept
+            : parent(p), pos(start), on_dense(use_dense) {
+            skip_to_valid();
+        }
+
+        // 直接跳转到下一个合法范围内且节点索引合法的位置
+        void skip_to_valid() noexcept {
+            if (!parent) return;
+            if (!on_dense) {
+                // 理论上可以直接 pos++，但防御
+                while (pos < parent->active_count && parent->entries[pos].index == invalid_index) pos++;
+            } else {
+                if (!parent->dense) {
+                    pos = Capacity;
+                    return;
+                }
+                while (pos < Capacity && parent->dense[pos] == invalid_index) pos++;
+            }
+        }
+
+        // 不返回引用，否则立马悬空引用
+        ChildEntry operator*() const noexcept {
+            if (!on_dense) {
+                const Entry &e = parent->entries[pos];
+                return ChildEntry{e.key, e.index};
+            }
+            return ChildEntry{CastUChar(pos), parent->dense[pos]}; // 稠密
+        }
+
+        ConstChildIterator &operator++() noexcept {
+            pos++;
+            skip_to_valid();
+            return *this;
+        }
+
+        ConstChildIterator operator++(int) noexcept {
+            ConstChildIterator tmp = *this;
+            ++(*this);
+            return tmp;
+        }
+
+        friend bool operator==(const ConstChildIterator &lhs, const ConstChildIterator &rhs) noexcept {
+            return lhs.parent == rhs.parent && lhs.pos == rhs.pos && lhs.on_dense == rhs.on_dense;
+        }
+
+        friend bool operator!=(const ConstChildIterator &lhs, const ConstChildIterator &rhs) noexcept {
+            return !(lhs == rhs);
+        }
+    };
+
+    [[nodiscard]] ConstChildIterator child_begin() const noexcept {
+        return active_count ? ConstChildIterator{this, 0, using_dense} : child_end();
+    }
+
+    [[nodiscard]] ConstChildIterator child_end() const noexcept {
+        return ConstChildIterator{this, using_dense ? Capacity : active_count, using_dense}; // 防止 skip UB
+    }
 
     std::array<Entry, Threshold> entries;
     std::unique_ptr<IndexType[], DenseDeleter> dense; // nullptr 表示尚未分配

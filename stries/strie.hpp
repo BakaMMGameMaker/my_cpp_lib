@@ -4,8 +4,10 @@
 #include "stries_free_list.hpp"
 #include "sutils.hpp"
 #include <algorithm>
+#include <cstddef>
 #include <ios>
 #include <istream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <memory_resource>
@@ -20,6 +22,7 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include <x86gprintrin.h>
 
 // 搜索结果返回类型概念约束
 template <typename R>
@@ -70,9 +73,9 @@ concept Tries = requires(T t, const T ct, std::string_view sv, SizeT limit) {
  * @tparam ReuseDeadNodes 是否复用内存池中的死亡节点，启用可以节省内存，但降低缓存命中率
  * @tparam ValueType 值类型
  */
-template <TriesChildrenStorage ChildrenStorageType, bool ReuseDeadNodes = false, typename ValueType = void>
+template <TriesChildrenStorage ChildrenStorageType = HybridDynamicChildren<>, bool ReuseDeadNodes = false,
+          typename ValueType = void>
 class STrie {
-
     using IndexType = UInt32;
     using NodeBase = TrieNodeBase<ValueType>;
 
@@ -104,6 +107,166 @@ class STrie {
         bool has_value() const noexcept { return NodeBase::has_value(); }
     };
 
+    template <bool IsConst, typename T = ValueType>
+        requires(!std::is_void_v<T>)
+    class BasicIterator {
+        // conditional t <condition, type if true, type if false>
+        using TrieType = std::conditional_t<IsConst, const STrie, STrie>;
+        using NodeType = std::conditional_t<IsConst, const Node, Node>;
+        using ValueRef = std::conditional_t<IsConst, const T, T>;
+        using ChildIter = typename ChildrenStorageType::ConstChildIterator;
+        using ChildEntry = typename ChildrenStorageType::ChildEntry;
+
+        struct Frame {
+            IndexType node_index; // 当前节点在 node_pool 中的下标
+            ChildIter it;         // 当前节点的孩子的迭代器
+            ChildIter end;        // 当前节点指向 end 位置的孩子迭代器
+            bool visit_self;      // 是否需要访问自己
+
+            friend bool operator==(const Frame &, const Frame &) = default;
+        };
+
+        TrieType *trie = nullptr; // nullptr 表示 end 迭代器
+        std::vector<Frame> stack; // dfs 栈
+        std::string current_word; // 当前路径对应前缀字符串
+
+        // 从当前状态推进到下一个有值的节点
+        void advance() {
+            if (!trie) return;
+            while (!stack.empty()) {
+                Frame &frame = stack.back();
+                NodeType &node = trie->node_pool[frame.node_index];
+
+                // 自己有值，直接返回
+                if (frame.visit_self) {
+                    frame.visit_self = false;     // 注意不要 pop，因为解引用的时候要访问 back
+                    if (node.has_value()) return; // 等待下一次 advance
+                }
+
+                // 确保无需再访问自己后再访问孩子
+                if (frame.it == frame.end) {
+                    // 当前节点的孩子已经遍历完毕
+                    stack.pop_back();                                   // 弹出当前节点
+                    if (!current_word.empty()) current_word.pop_back(); // 弹出当前字符
+                    continue;                                           // 直接跳到下一个节点
+                }
+
+                // 第一遍到这里时，it 为孩子的 begin
+                ChildEntry entry = *frame.it; // 从孩子迭代器解引用得到 entry{UChar, IndexType}
+                ++frame.it;                   // 步进孩子迭代器，指向下一个 Index != invalid index 的位置
+
+                const UChar key = entry.first;
+                const IndexType child_node_index = entry.second;
+                if (child_node_index == invalid_index) [[unlikely]] // 防御
+                    continue;
+
+                current_word.push_back(static_cast<char>(key));
+                NodeType &child_node = trie->node_pool[child_node_index];
+
+                // 新建 Frame
+                Frame child_frame{child_node_index, child_node.children.child_begin(), child_node.children.child_end(),
+                                  child_node.has_value()};
+                stack.push_back(child_frame);
+            }
+
+            // stack 已经 empty
+            trie = nullptr;
+            stack.clear();
+            current_word.clear();
+        }
+
+    public:
+        using iterator_category = std::input_iterator_tag;
+        using value_type = std::pair<std::string, ValueRef &>;
+        using difference_type = std::ptrdiff_t;
+
+        BasicIterator() = default;
+
+        // begin() 走这里
+        explicit BasicIterator(TrieType *trie_) : trie(trie_) {
+            if (!trie_ || trie_->node_pool.empty() || trie_->word_count == 0) {
+                trie = nullptr; // 等价于已经遍历到末尾
+                return;
+            }
+
+            const IndexType root_node_index = 0;
+            NodeType &root_node = trie_->node_pool[root_node_index]; // 根节点
+
+            Frame root_frame{root_node_index, root_node.children.child_begin(), root_node.children.child_end(),
+                             root_node.has_value()}; // 初始化根帧
+            stack.push_back(root_frame);
+            current_word.clear();
+
+            // 推进到第一个有值的节点
+            advance();
+        }
+
+        // 构造 end 迭代器
+        static BasicIterator make_end(TrieType *) { return BasicIterator{}; }
+
+        value_type operator*() const {
+            const Frame &frame = stack.back(); // 获取最后一帧
+            // 以下两行的类型的 const 情况会自动根据 IsConst 的值处理
+            NodeType &node = trie->node_pool[frame.node_index];
+            ValueRef &value = node.value.value(); // 这里调用的是 optional.value()
+            return value_type{current_word, value};
+        }
+
+        BasicIterator &operator++() {
+            advance();
+            return *this;
+        }
+
+        BasicIterator operator++(int) {
+            BasicIterator tmp = *this;
+            ++(*this);
+            return tmp;
+        }
+
+        friend bool operator==(const BasicIterator &lhs, const BasicIterator &rhs) {
+            if (!lhs.trie && !rhs.trie) return true; // 两个 end 默认相等
+            if (lhs.trie != rhs.trie) return false;
+            return lhs.stack == rhs.stack && lhs.current_word == rhs.current_word;
+        }
+
+        friend bool operator!=(const BasicIterator &lhs, const BasicIterator &rhs) { return !(lhs == rhs); }
+    };
+
+public: // get iterators
+    template <typename T = ValueType>
+        requires(!std::is_void_v<T>)
+    using iterator = BasicIterator<false, T>; // 普通非 const 迭代器
+
+    template <typename T = ValueType>
+        requires(!std::is_void_v<T>)
+    using const_iterator = BasicIterator<true, T>;
+
+    template <typename T = ValueType>
+        requires(!std::is_void_v<T>)
+    [[nodiscard]] iterator<T> begin() noexcept {
+        return iterator<T>(this);
+    }
+
+    template <typename T = ValueType>
+        requires(!std::is_void_v<T>)
+    [[nodiscard]] iterator<T> end() noexcept {
+        return iterator<T>::make_end(this);
+    }
+
+    // const begin / end
+    template <typename T = ValueType>
+        requires(!std::is_void_v<T>)
+    [[nodiscard]] const_iterator<T> begin() const noexcept {
+        return const_iterator<T>(this);
+    }
+
+    template <typename T = ValueType>
+        requires(!std::is_void_v<T>)
+    [[nodiscard]] const_iterator<T> end() const noexcept {
+        return const_iterator<T>::make_end(this);
+    }
+
+private:
     // TODO：deque 版本，但考虑到 deque 版本缓存比较不友好，暂时不考虑，更倾向于一次性 reserve 足够空间
     std::pmr::vector<Node> node_pool;                   // 节点内存池
     TriesFreeList<IndexType, ReuseDeadNodes> free_list; // 空闲节点列表
@@ -111,7 +274,7 @@ class STrie {
     SizeT word_count;                                   // 单词数量统计
     mutable std::shared_mutex shared_mutex;             // 读写锁
 
-public:
+public: // properties
     // 获取单词总数
     [[nodiscard]] SizeT size() const noexcept {
         std::shared_lock<std::shared_mutex> read_lock(shared_mutex);
@@ -128,7 +291,7 @@ public:
         return node_pool.size() - free_list.size();
     }
 
-private:
+private: // private methods
     // 创建新的节点
     IndexType create_node() {
         if constexpr (ReuseDeadNodes) {                   // 要复用死亡节点
@@ -289,7 +452,7 @@ private:
         create_node();  // 重新创建根节点
     }
 
-public:
+public: // public interface
     // 添加新的单词
     template <typename T = ValueType>
         requires(std::is_void_v<T>)
