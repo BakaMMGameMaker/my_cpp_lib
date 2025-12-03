@@ -5,6 +5,7 @@
 #include <concepts>
 #include <cstddef>
 #include <initializer_list>
+#include <iostream>
 #include <iterator>
 #include <memory>
 #include <stdexcept>
@@ -363,20 +364,23 @@ public:
     }
 
     void rehash(size_type new_capacity) {
+        if (capacity_ == 0) { // and size == 0
+            allocate_storage(detail::k_min_capacity);
+            return;
+        }
         if (size_ == 0) {
-            destroy_all();        // TODO：size 都为 0 了这里究竟在 destroy 什么？
-            deallocate_storage(); // 归还原来的空间
-            if (new_capacity == 0) return;
+            deallocate_storage();          // 归还原来的空间
+            if (new_capacity == 0) return; // 不申请任何空间
+            // new cap = 2 ^ n (n >= 3)
             new_capacity = std::max(new_capacity, detail::k_min_capacity);
             new_capacity = detail::next_power_of_two(new_capacity);
             allocate_storage(new_capacity);
             return;
         }
-        // ^^^ size_ == 0
-        // vvv size_ != 0
-        new_capacity = std::max(new_capacity, size_);
-        new_capacity = std::max(new_capacity, detail::k_min_capacity);
-        new_capacity = detail::next_power_of_two(new_capacity);
+
+        new_capacity = std::max(new_capacity, size_);                  // new cap >= size_
+        new_capacity = std::max(new_capacity, detail::k_min_capacity); // new cap >= 8
+        new_capacity = detail::next_power_of_two(new_capacity);        // new cap = 2 ^ n
 
         auto old_controls = controls_;
         auto old_slots = slots_;
@@ -384,7 +388,7 @@ public:
 
         allocate_storage(new_capacity);
 
-        size_ = 0;
+        size_ = 0;    // insert 会增 size_，提前归零
         deleted_ = 0; // rehash 之后不会有任何墓碑
 
         // 搬迁旧元素
@@ -454,15 +458,19 @@ public:
 
     // 让 operator[] 行为一致，不存在的 key 自动 emplace 一个默认值
     mapped_type &operator[](const key_type &key) {
-        auto [index, found] = find_or_prepare_insert(key);
-        if (!found) emplace_at_index(index, key, mapped_type{});
+        SizeT hash_result = hash_key(key);
+        control_t short_hash_result = detail::short_hash(hash_result);
+        auto [index, found] = find_or_prepare_insert(key, hash_result, short_hash_result);
+        if (!found) emplace_at_index(index, short_hash_result, key, mapped_type{});
         return slots_[index].kv.second; // 可直接作为等号左侧内容赋值
     }
 
     // 右值版本，不是万能引用
     mapped_type &operator[](key_type &&key) {
-        auto [index, found] = find_or_prepare_insert(key);
-        if (!found) emplace_at_index(index, std::move(key), mapped_type{});
+        SizeT hash_result = hash_key(key);
+        control_t short_hash_result = detail::short_hash(hash_result);
+        auto [index, found] = find_or_prepare_insert(key, hash_result, short_hash_result);
+        if (!found) emplace_at_index(index, short_hash_result, std::move(key), mapped_type{});
         return slots_[index].kv.second;
     }
 
@@ -471,33 +479,40 @@ public:
 
     // 右值版本
     std::pair<iterator, bool> insert(value_type &&value) {
-        // TODO: 优化掉这里的 const cast
-        return emplace(std::move(const_cast<KeyType &>(value.first)), std::move(value.second));
-    }
-
-    // 注意，这里 mapped_type 和 ValueType 已经是固定的类型，&& 不再是万能引用，所以需要一个新的模板参数
-    template <typename M>
-        requires std::constructible_from<mapped_type, M> // 防止乱传
-    std::pair<iterator, bool> insert_or_assign(const key_type &key, M &&mapped) {
-        // 这里可能有问题，find or prepare insert 里面可能会进行一次 rehash，然而如果 key 存在，rehash 或许是不必要的
-        auto [index, found] = find_or_prepare_insert(key);
-        if (found) {
-            slots_[index].kv.second = std::forward<M>(mapped);
-            return {iterator(this, index), false}; // false 表示非 insert
-        }
-        emplace_at_index(index, key, std::forward<M>(mapped));
+        SizeT hash_result = hash_key(value.first);
+        control_t short_hash_result = detail::short_hash(hash_result);
+        auto [index, found] = find_or_prepare_insert(value.first, hash_result, short_hash_result);
+        if (found) return {iterator(this, index), false};
+        // TODO: 此处 move(value.first) 仍然是拷贝，修改结构来实现真正移动
+        emplace_at_index(index, short_hash_result, std::move(value.first), std::move(value.second));
         return {iterator(this, index), true};
     }
 
-    template <typename... Args>
-        requires std::constructible_from<value_type, Args...>
-    std::pair<iterator, bool> emplace(Args &&...args) {
-        value_type kv(std::forward<Args>(args)...);
-        auto [index, found] = find_or_prepare_insert(kv.first);
-        if (found) return {iterator(this, index), false}; // key 已经存在
+    // 插入或者赋值，return true = insert, false = assign
+    template <typename M>                                // 注意，这里 mapped_type 和 ValueType 已经是固定的类型，&&
+                                                         // 不再是万能引用，所以需要一个新的模板参数
+        requires std::constructible_from<mapped_type, M> // 防止乱传
+    std::pair<iterator, bool> insert_or_assign(const key_type &key, M &&mapped) {
+        SizeT hash_result = hash_key(key);
+        control_t short_hash_result = detail::short_hash(hash_result);
+        auto [index, found] = find_or_prepare_insert(key, hash_result, short_hash_result);
+        if (found) {
+            slots_[index].kv.second = std::forward<M>(mapped);
+            return {iterator(this, index), false}; // assign -> false
+        }
+        emplace_at_index(index, short_hash_result, key, std::forward<M>(mapped));
+        return {iterator(this, index), true};
+    }
 
-        // TODO: const cast
-        emplace_at_index(index, std::move(const_cast<KeyType &>(kv.first)), std::move(kv.second));
+    template <typename K, typename M>
+        requires(std::constructible_from<key_type, K> && std::constructible_from<mapped_type, M>)
+    std::pair<iterator, bool> emplace(K &&key, M &&mapped) {
+        SizeT hash_result = hash_key(key);
+        control_t short_hash_result = detail::short_hash(hash_result);
+        auto [index, found] = find_or_prepare_insert(key, hash_result, short_hash_result);
+        if (found) return {iterator(this, index), false};
+        // ^^^ key exists / key not exists vvv
+        emplace_at_index(index, short_hash_result, std::forward<K>(key), std::forward<M>(mapped));
         return {iterator(this, index), true};
     }
 
@@ -579,21 +594,12 @@ private:
         }
     }
 
-    void maybe_grow_for_insert() {
-        size_type used = size_ + deleted_;
-        // + 1 给新的还未被插入的元素做准备
-        if (capacity_ == 0 || static_cast<float>(used + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
-            size_type new_capacity = capacity_ == 0 ? detail::k_min_capacity : capacity_ * 2;
-            rehash(new_capacity);
-        }
-    }
-
+    // 接收 hash result 快速计算探测起点，避免再次 hash
     size_type find_index(const key_type &key, SizeT hash_result) const noexcept {
         if (capacity_ == 0) return npos;
         control_t short_hash_result = detail::short_hash(hash_result);
         size_type mask = capacity_ - 1;
-        // 计算探测起点
-        size_type index = static_cast<size_type>(hash_result) & mask; // 相当于 hash(key) & (capacity - 1)
+        size_type index = static_cast<size_type>(hash_result) & mask; // 探测起点
 
         for (size_type probe = 0; probe < capacity_; ++probe) { // 最多往前探测 capacity 步
             control_t control_byte = controls_[index];          // 下面会更新 index，别急
@@ -608,51 +614,50 @@ private:
         return npos; // 探测完整个 capacity_ 都没找到
     }
 
-    // 查找或者得到一个可以插入的位置
-    std::pair<size_type, bool> find_or_prepare_insert(const key_type &key) {
-        maybe_grow_for_insert(); // 需要注意这里的行为，没有管 key 是否已经存在都 rehash
+    // 给定 key，若存在于表中，返回其 index，否则返回可插入的位置
+    template <typename K>
+        requires std::constructible_from<key_type, K>
+    [[nodiscard]] std::pair<size_type, bool> find_or_prepare_insert(const K &key, SizeT hash_result,
+                                                                    control_t short_hash_result) {
+        // 首次插入时建表
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
-        SizeT hash_result = hash_key(key);
-        control_t short_hash_result = detail::short_hash(hash_result);
         size_type mask = capacity_ - 1;
-        size_type index = static_cast<size_type>(hash_result) & mask; // 探测起点
-        size_type first_deleted = npos;                               // 第一个墓碑位置
+        size_type index = static_cast<size_type>(hash_result) & mask;
+        size_type first_deleted = npos;
 
         for (size_type probe = 0; probe < capacity_; ++probe) {
             control_t control_byte = controls_[index];
-            if (control_byte == detail::k_empty) {
-                if (first_deleted != npos) return {first_deleted, false};
-                return {index, false}; // false 代表 find 的结果为 false
+            if (control_byte == detail::k_empty) { // key 的确不存在，需要占用新位置
+                size_type insert_index = (first_deleted != npos) ? first_deleted : index;
+                size_type used = size_ + deleted_;
+                // + 1 给新的还未被插入的元素做准备
+                if (capacity_ == 0 || static_cast<float>(used + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
+                    size_type new_capacity = capacity_ == 0 ? detail::k_min_capacity : capacity_ * 2;
+                    rehash(new_capacity);
+                    // 不得不再走一遍，因为表的结构已经改变
+                    return find_or_prepare_insert(key, hash_result, short_hash_result);
+                }
+                return {insert_index, false};
             }
-            // 注意，此处可能 key 已经存在，所以不能找到第一个墓碑位置就直接返回
-            // key 不存在的标识永远都是遇到了 EMPTY
             if (control_byte == detail::k_deleted) {
                 if (first_deleted == npos) first_deleted = index;
             } else if (control_byte == short_hash_result) {
-                // 可能找到了 key
-                // key_type &stored_key = const_cast<key_type &>(slots_[index].kv.first); // 这里的 const cast 是多余的
                 const key_type &stored_key = slots_[index].kv.first;
                 if (equal_(stored_key, key)) return {index, true};
             }
             index = (index + 1) & mask;
         }
-        // 如果 key 存在，那么一定触发 if equal
-        // 如果 key 不存在，maybe grow 确保有充足容量
-        // 走到这里就是错误，别让程序以非预期状态运行还伪装成没问题的样子
-        throw std::logic_error("Unknown logic error");
+        throw std::logic_error("no empty slot found"); // 反思一下为什么会到这里
     }
 
     template <typename K, typename M>
         requires(std::constructible_from<key_type, K> && std::constructible_from<mapped_type, M>)
-    void emplace_at_index(size_type index, K &&key, M &&mapped) {
+    void emplace_at_index(size_type index, control_t short_hash_result, K &&key, M &&mapped) {
         std::construct_at(std::addressof(slots_[index].kv),
-                          std::piecewise_construct,                    // 老伙计，分片构造避免临时对象
+                          std::piecewise_construct,                    // 分片构造避免临时对象
                           std::forward_as_tuple(std::forward<K>(key)), //
                           std::forward_as_tuple(std::forward<M>(mapped)));
-        // TODO：这里会多出一次 hash key 操作，赶紧优化掉
-        // 不能相信用户的 hasher，万一它们 while(i<114514)++i; 完再 return 呢，倒时候赖我头上说我慢
-        SizeT hash_result = hash_key(slots_[index].kv.first);
-        controls_[index] = detail::short_hash(hash_result);
+        controls_[index] = short_hash_result;
         ++size_;
     }
 
