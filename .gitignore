@@ -1,7 +1,9 @@
 *
 
+
 # 白名单
 !*/
+!README.md
 !.gitignore
 !*.cpp
 !*.hpp
