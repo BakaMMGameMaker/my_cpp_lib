@@ -417,16 +417,16 @@ public:
         // 原本有 storage 但无活跃元素
         if (size_ == 0) {
             deallocate_storage();
-            controls_ = nullptr;
-            slots_ = nullptr;
             deleted_ = 0;
             if (new_capacity == 0) { // 无活跃元素且 rehash(0) -> 空 map
+                controls_ = nullptr;
+                slots_ = nullptr;
                 capacity_ = 0;
                 return;
             }
             if (new_capacity <= detail::k_min_capacity) new_capacity = detail::k_min_capacity;
             else new_capacity = detail::next_power_of_two(new_capacity);
-            allocate_storage(new_capacity); // 内部更新 capacity_ = new_capacity
+            allocate_storage(new_capacity); // 内部更新 capacity_ = new_capacity，controls_ 和 slot_
             return;
         }
 
@@ -678,6 +678,69 @@ private:
         }
     }
 
+    // 专门为 find_or_prepare_insert 准备的快 rehash 路径，由 deleted > size_ * alpha 触发
+    // 确保 capacity >= default min capacity
+    void cleanup_rehash() {
+
+        deleted_ = 0; // 清理后一定没有墓碑
+
+        // 原本有 storage 但没有活跃元素
+        if (size_ == 0) {
+            deallocate_storage();
+            allocate_storage(capacity_);
+            return;
+        }
+
+        // 原本有 storage 也有活跃元素
+        auto old_controls = controls_;
+        auto old_slots = slots_;
+        auto old_capacity = capacity_;
+        allocate_storage(capacity_); // 里面重置上面三者，所以需要提前保存
+
+        size_ = 0; // insert 会增 size_，提前归零
+
+        for (size_type index = 0; index < old_capacity; ++index) {
+            control_t control_byte = old_controls[index];
+            if (control_byte == detail::k_empty || control_byte == detail::k_deleted) continue;
+            value_type &kv = old_slots[index].kv;
+            size_type hash_result = hash_key(kv.first);
+            control_t short_hash_result = detail::short_hash(hash_result);
+            size_type insert_index = find_insert_index_for_rehash(hash_result);
+            emplace_at_index(insert_index, short_hash_result, std::move(kv.first), std::move(kv.second));
+            std::destroy_at(std::addressof(kv)); // 调用析构函数
+        }
+        control_alloc_.deallocate(old_controls, old_capacity);
+        slot_alloc_traits::deallocate(slot_alloc_, old_slots, old_capacity);
+    }
+
+    // 专门为 find_or_prepare_insert 准备的快 rehash 路径，确保 capacity >= k min capacity
+    // 因为 used 过多而触发，此处 size 不可能为 0，否则 deleted > size_ * alpha 必然成立，会走上面 cleanup_rehash
+    // new_capacity = capacity * 2
+    void double_storage() {
+
+        auto old_controls = controls_;
+        auto old_slots = slots_;
+        auto old_capacity = capacity_;
+        allocate_storage(capacity_ * 2); // 里面重置上面三者，所以需要提前保存
+
+        size_ = 0;    // insert 会增 size_，提前归零
+        deleted_ = 0; // rehash 之后不会有任何墓碑
+
+        // 搬迁旧元素
+        for (size_type index = 0; index < old_capacity; ++index) {
+            control_t control_byte = old_controls[index];
+            if (control_byte == detail::k_empty || control_byte == detail::k_deleted) continue;
+            value_type &kv = old_slots[index].kv;
+            size_type hash_result = hash_key(kv.first);
+            control_t short_hash_result = detail::short_hash(hash_result);
+            size_type insert_index = find_insert_index_for_rehash(hash_result);
+            emplace_at_index(insert_index, short_hash_result, std::move(kv.first), std::move(kv.second));
+            std::destroy_at(std::addressof(kv)); // 调用析构函数
+        }
+        control_alloc_.deallocate(old_controls, old_capacity);
+        slot_alloc_traits::deallocate(slot_alloc_, old_slots, old_capacity);
+    }
+
     // 返回 key 的 index
     size_type find_index(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
         if (capacity_ == 0) return npos;
@@ -734,8 +797,8 @@ private:
                 if (static_cast<float>(used + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
                     // TODO: deleted > size * alpha
                     // 清理墓碑别放外面，不然没事就重哈希，和傻逼一样
-                    if (deleted_ > size_ && size_ > 0) rehash(capacity_);
-                    else rehash(capacity_ * 2);                                         // 扩容
+                    if (deleted_ > size_ && size_ > 0) cleanup_rehash();
+                    else double_storage();
                     return find_or_prepare_insert(key, hash_result, short_hash_result); // 表的结构已经改变，再走一遍
                 }
                 return {index, false};
@@ -760,7 +823,7 @@ private:
                           std::forward_as_tuple(std::forward<K>(key)), //
                           std::forward_as_tuple(std::forward<M>(mapped)));
         controls_[index] = short_hash_result;
-        ++size_; // 这是 100% 发生的，放这里就行
+        ++size_; // TODO: 放到外面去
     }
 
     void erase_at_index(size_type index) noexcept {
