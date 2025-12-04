@@ -200,7 +200,7 @@ public:
         using difference_type = flat_hash_map::difference_type;
 
         const_iterator() noexcept = default;
-        // 这里不是拷贝构造函数
+        // 这里不是拷贝构造函数，用于使用 const iterator 接收 iterator
         const_iterator(const iterator &it) noexcept : map_(it.map_), index_(it.index_) {}
 
         const value_type &operator*() const noexcept { return map_->slots_[index_].kv; }
@@ -234,11 +234,11 @@ public:
                              std::is_nothrow_default_constructible_v<Alloc>)
         : hasher_(), equal_(), alloc_(), slot_alloc_(alloc_) {}
 
-    // 接收初始容量的构造函数
-    explicit flat_hash_map(size_type initial_capacity, const HasherType &hasher = HasherType{},
+    // 接收初始 size 的构造函数
+    explicit flat_hash_map(size_type init_size, const HasherType &hasher = HasherType{},
                            const KeyEqualType &equal = KeyEqualType{}, const Alloc &alloc = Alloc{})
         : hasher_(hasher), equal_(equal), alloc_(alloc), slot_alloc_(alloc_) {
-        reserve(initial_capacity);
+        reserve(init_size);
     }
 
     flat_hash_map(std::initializer_list<value_type> init, const HasherType &hasher = HasherType{},
@@ -342,11 +342,20 @@ public:
     // properties getter
     bool empty() const noexcept { return size_ == 0; }
     size_type size() const noexcept { return size_; }
+    size_type deleted() const noexcept { return deleted_; }
     size_type capacity() const noexcept { return capacity_; }
-    float load_factor() const noexcept { return max_load_factor_; }
+    float load_factor() const noexcept {
+        if (capacity_ == 0) return 0.0f;
+        return static_cast<float>(size_) / static_cast<float>(capacity_);
+    }
+    float max_load_factor() const noexcept { return max_load_factor_; }
 
     // properties setter
-    void max_load_factor(float load_factor) { max_load_factor_ = load_factor; }
+    void max_load_factor(float load_factor) {
+        if (load_factor <= 0.0f) throw std::invalid_argument("flat_hash_map::max_load_factor: load_factor must be > 0");
+        max_load_factor_ = load_factor;
+        // 不主动 rehash
+    }
 
     // 不仅销毁全部 kv，还重置所有槽位为 empty
     void clear() noexcept {
@@ -364,6 +373,29 @@ public:
         rehash(min_capacity);
     }
 
+    // 交换
+    void
+    swap(flat_hash_map &other) noexcept(std::allocator_traits<allocator_type>::propagate_on_container_swap::value ||
+                                        std::allocator_traits<allocator_type>::is_always_equal::value) {
+        if (this == &other) return;
+        using std::swap;
+        if constexpr (std::allocator_traits<allocator_type>::propagate_on_container_swap::value) {
+            swap(alloc_, other.alloc_);
+            swap(slot_alloc_, other.slot_alloc_);
+        }
+
+        swap(hasher_, other.hasher_);
+        swap(equal_, other.equal_);
+        swap(control_alloc_, other.control_alloc_);
+        swap(controls_, other.controls_);
+        swap(slots_, other.slots_);
+        swap(capacity_, other.capacity_);
+        swap(size_, other.size_);
+        swap(deleted_, other.deleted_);
+        swap(max_load_factor_, other.max_load_factor_);
+    }
+
+    // 重哈希
     void rehash(size_type new_capacity) {
         if (size_ == 0) {
             deallocate_storage();          // 归还原来的空间
@@ -527,8 +559,9 @@ public:
 
     // 按值传递
     iterator erase(iterator pos) {
-        if (pos == end()) return pos;
+        if (pos == end()) return end();
         size_type index = pos.index_;
+        // TODO: 或许可以提供一个重载版本 rehash，接收 old_delete_index，返回 next occupied index
         erase_at_index(index);
         iterator it(this, index);
         it.skip_to_next_occupied();
@@ -540,6 +573,27 @@ public:
         size_type index = pos.index_;
         erase_at_index(index);
         iterator it(this, index);
+        it.skip_to_next_occupied();
+        return it;
+    }
+
+    // 区间擦除
+    iterator erase(const_iterator first, const_iterator last) {
+        // 不检查是否来自当前 map，UB 是用户自己的锅
+        if (first == last) return iterator(this, first.index_);
+        size_type begin_index = first.index_;
+        size_type end_index = last.index_;
+        if (begin_index > capacity_) begin_index = capacity_;
+        if (end_index > capacity_) end_index = capacity_;
+
+        // begin index <= capacity_ vvv
+        for (size_type index = begin_index; index < end_index; ++index) {
+            control_t control_byte = controls_[index];
+            if (control_byte != detail::k_empty && control_byte != detail::k_deleted) erase_at_index(index);
+        }
+
+        if (end_index >= capacity_) return end();
+        iterator it(this, end_index);
         it.skip_to_next_occupied();
         return it;
     }
@@ -593,7 +647,7 @@ private:
         }
     }
 
-    // 接收 hash result 快速计算探测起点，避免再次 hash
+    // 返回 key 的 index
     size_type find_index(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
         if (capacity_ == 0) return npos;
         size_type mask = capacity_ - 1;
@@ -612,12 +666,11 @@ private:
         return npos; // 探测完整个 map 都没找到
     }
 
-    // 给定 key，若存在于表中，返回其 index，否则返回可插入的位置
+    // 给定 key，存在则返回其 index，否则返回可插入位置
     template <typename K>
         requires std::constructible_from<key_type, K>
     [[nodiscard]] std::pair<size_type, bool> find_or_prepare_insert(const K &key, SizeT hash_result,
                                                                     control_t short_hash_result) {
-        // 首次插入时必定需要扩容
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
         size_type mask = capacity_ - 1;
         size_type index = static_cast<size_type>(hash_result) & mask;
@@ -626,15 +679,19 @@ private:
         for (size_type probe = 0; probe < capacity_; ++probe) {
             control_t control_byte = controls_[index];
             if (control_byte == detail::k_empty) { // key 的确不存在，需要占用新位置
-                size_type insert_index = (first_deleted != npos) ? first_deleted : index;
-                size_type used = size_ + deleted_;
+                // 遇到过 DELETED，重用墓碑，不 rehash
+                if (first_deleted != npos) return {first_deleted, false};
+                // 没有墓碑可用，准备占用 EMPTY 槽位
+                // - 如果当前墓碑太多，先重哈希清理墓碑
+                // - 否则扩容
+                size_type used = size_ + deleted_; // 已占用 = size + 墓碑
                 // + 1 给新的还未被插入的元素做准备
                 if (static_cast<float>(used + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
-                    rehash(capacity_ * 2);
-                    // 不得不再走一遍，因为表的结构已经改变
-                    return find_or_prepare_insert(key, hash_result, short_hash_result);
+                    if (deleted_ > size_ && size_ > 0) rehash(capacity_);               // 清理墓碑
+                    else rehash(capacity_ * 2);                                         // 扩容
+                    return find_or_prepare_insert(key, hash_result, short_hash_result); // 表的结构已经改变，再走一遍
                 }
-                return {insert_index, false};
+                return {index, false};
             }
             if (control_byte == detail::k_deleted) {
                 if (first_deleted == npos) first_deleted = index;
@@ -650,12 +707,15 @@ private:
     template <typename K, typename M>
         requires(std::constructible_from<key_type, K> && std::constructible_from<mapped_type, M>)
     void emplace_at_index(size_type index, control_t short_hash_result, K &&key, M &&mapped) {
+        control_t &control_byte = controls_[index];
+        bool was_deleted = control_byte == detail::k_deleted;
         std::construct_at(std::addressof(slots_[index].kv),
                           std::piecewise_construct,                    // 分片构造
                           std::forward_as_tuple(std::forward<K>(key)), //
                           std::forward_as_tuple(std::forward<M>(mapped)));
         controls_[index] = short_hash_result;
         ++size_;
+        deleted_ -= was_deleted;
     }
 
     void erase_at_index(size_type index) noexcept {
@@ -663,9 +723,25 @@ private:
         controls_[index] = detail::k_deleted;
         --size_;
         ++deleted_;
-        if (deleted_ > size_ && size_ > 0) { // 墓碑太多，重建表
-            rehash(capacity_);               // 不改 capacity，仅清理墓碑
-        }
     }
+
+    friend bool operator==(const flat_hash_map &lhs, const flat_hash_map &rhs) {
+        if (&lhs == &rhs) return true;
+        if (lhs.size_ != rhs.size_) return false;
+        if (lhs.size_ == 0) return true; // l.size == r.size == 0
+
+        for (size_type index = 0; index < lhs.capacity_; ++index) {
+            control_t control_byte = lhs.controls_[index];
+            if (control_byte == detail::k_empty || control_byte == detail::k_deleted) continue;
+
+            const value_type &kv = lhs.slots_[index].kv;
+            auto it = rhs.find(kv.first);
+            if (it == rhs.end()) return false;            // 对面没有这个键
+            if (!(it->second == kv.second)) return false; // 两个键 value 不等
+        }
+        return true;
+    }
+
+    friend void swap(flat_hash_map &lhs, flat_hash_map &rhs) noexcept(noexcept(lhs.swap(rhs))) { lhs.swap(rhs); }
 }; // flat_hash_map
 } // namespace sflat
