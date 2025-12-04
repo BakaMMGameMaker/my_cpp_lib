@@ -5,7 +5,6 @@
 #include <concepts>
 #include <cstddef>
 #include <initializer_list>
-#include <iostream>
 #include <iterator>
 #include <memory>
 #include <stdexcept>
@@ -53,7 +52,7 @@ inline constexpr SizeT next_power_of_two(SizeT x) noexcept {
 #if SIZE_MAX > 0xFFFFFFFFu // 仅在 64bit 架构，即 size_t = UInt64 时执行
     x |= x >> 32;          // 确保 64 位都为 1
 #endif
-    return x + 1; // 进位，注意超过最高位时会溢出变为 0，但那不是正常哈希表应该出现的情况
+    return x + 1; // 进位，超过最高位时会溢出变为 0，但不是正常表应该出现的情况
 }
 
 // 7-bit hash 指纹
@@ -90,16 +89,20 @@ concept EqualFor = requires(const KeyEqualType &e, const KeyType &a, const KeyTy
 } // namespace detail
 
 template <typename KeyType, typename ValueType, typename HasherType = std::hash<KeyType>,
-          typename KeyEqualType = std::equal_to<KeyType>, // 比较器，相当于包装了 lhs == rhs 的 functor
-          typename Alloc = std::allocator<std::pair<const KeyType, ValueType>>> // key 一旦被插入就不应该被修改
+          typename KeyEqualType = std::equal_to<KeyType>,                 // 比较器，相当于包装了 lhs == rhs 的 functor
+          typename Alloc = std::allocator<std::pair<KeyType, ValueType>>> // key 一旦被插入就不应该被修改
     requires detail::HashKey<KeyType> && detail::HashValue<ValueType> && detail::HashFor<HasherType, KeyType> &&
              detail::EqualFor<KeyEqualType, KeyType>
 class flat_hash_map {
 public:
+    // control_t = uint8
+    // k empty = 0x80
+    // k deleted = 0xfe
+    // k min capacity = 8
+    // k default max load factor = .875
     using key_type = KeyType;
     using mapped_type = ValueType;
-    // TODO: 让 KeyType Map 内可变，但对外 const view
-    using value_type = std::pair<const KeyType, ValueType>;
+    using value_type = std::pair<KeyType, ValueType>; // it->first = new_key 是用户的锅，不是我的
     using size_type = SizeT;
     using difference_type = std::ptrdiff_t;
     using hasher_type = HasherType;
@@ -113,7 +116,7 @@ private:
 
     using control_t = detail::control_t;
     // 通过 allocator traits 包装 allocator type，提供作用明确的统一的接口
-    // 注意，此处不能直接 = std::allocator<Slot>，这样会无视用户传进来的 allocator
+    // 不能直接 = std::allocator<Slot>，这样会无视用户传进来的 allocator
     using slot_allocator_type = typename std::allocator_traits<allocator_type>::template rebind_alloc<Slot>;
     using slot_alloc_traits = std::allocator_traits<slot_allocator_type>;
 
@@ -132,7 +135,7 @@ public:
         // 留这个构造接口给容器用
         iterator(map_type *map, size_type index) noexcept : map_(map), index_(index) {}
 
-        // 注意默认构造函数中没有调用，需要在外部自行调用
+        // 默认构造函数中没有调用，需在外部自行调用
         void skip_to_next_occupied() noexcept {
             if (!map_) return;
             while (index_ < map_->capacity_) {
@@ -146,14 +149,12 @@ public:
         using iterator_category = std::forward_iterator_tag;
         using value_type = flat_hash_map::value_type;
         using difference_type = flat_hash_map::difference_type;
-        using pointer = value_type *;
-        using reference = value_type &;
 
         iterator() noexcept = default;
 
-        reference operator*() const noexcept { return map_->slots_[index_].kv; }
+        value_type &operator*() const noexcept { return map_->slots_[index_].kv; }
 
-        pointer operator->() const noexcept { return std::addressof(map_->slots_[index_].kv); }
+        value_type *operator->() const noexcept { return std::addressof(map_->slots_[index_].kv); }
 
         iterator &operator++() noexcept {
             ++index_;
@@ -197,16 +198,14 @@ public:
         using iterator_category = std::forward_iterator_tag;
         using value_type = flat_hash_map::value_type;
         using difference_type = flat_hash_map::difference_type;
-        using pointer = value_type *;
-        using reference = value_type &;
 
         const_iterator() noexcept = default;
-        // 注意这里是从非 const 版本构造，不是拷贝构造函数
+        // 这里不是拷贝构造函数
         const_iterator(const iterator &it) noexcept : map_(it.map_), index_(it.index_) {}
 
-        reference operator*() const noexcept { return map_->slots_[index_].kv; }
+        const value_type &operator*() const noexcept { return map_->slots_[index_].kv; }
 
-        pointer operator->() const noexcept { return std::addressof(map_->slots_[index_].kv); }
+        const value_type *operator->() const noexcept { return std::addressof(map_->slots_[index_].kv); }
 
         const_iterator &operator++() noexcept {
             ++index_;
@@ -246,7 +245,7 @@ public:
                   const KeyEqualType &equal = KeyEqualType{}, const Alloc &alloc = Alloc{})
         : hasher_(hasher), equal_(equal), alloc_(alloc), slot_alloc_(alloc_) {
         reserve(init.size());
-        // 注意这里的 value_type 是 std::pair<const KeyType, ValueType>
+        // 注意这里的 value_type 是 std::pair<KeyType, ValueType>
         for (const auto &kv : init) { insert(kv); }
     }
 
@@ -340,11 +339,14 @@ public:
 
     allocator_type get_allocator() const noexcept { return alloc_; }
 
-    // properties
+    // properties getter
     bool empty() const noexcept { return size_ == 0; }
     size_type size() const noexcept { return size_; }
     size_type capacity() const noexcept { return capacity_; }
-    float max_load_factor() const noexcept { return max_load_factor_; }
+    float load_factor() const noexcept { return max_load_factor_; }
+
+    // properties setter
+    void max_load_factor(float load_factor) { max_load_factor_ = load_factor; }
 
     // 不仅销毁全部 kv，还重置所有槽位为 empty
     void clear() noexcept {
@@ -356,18 +358,13 @@ public:
     }
 
     // 预留空间
-    void reserve(size_type new_capacity) {
-        // 注意用户传入的语义是 size，实际处理时要除以 max load factor，注意 cast to size type 是向下取整，所以要 + 1
-        size_type min_needed = static_cast<size_type>(static_cast<float>(new_capacity) / max_load_factor_) + 1;
-        if (min_needed <= capacity_) return;
-        rehash(min_needed);
+    void reserve(size_type new_size) {
+        size_type min_capacity = static_cast<size_type>(static_cast<float>(new_size) / max_load_factor_) + 1;
+        if (min_capacity <= capacity_) return;
+        rehash(min_capacity);
     }
 
     void rehash(size_type new_capacity) {
-        if (capacity_ == 0) { // and size == 0
-            allocate_storage(detail::k_min_capacity);
-            return;
-        }
         if (size_ == 0) {
             deallocate_storage();          // 归还原来的空间
             if (new_capacity == 0) return; // 不申请任何空间
@@ -429,7 +426,8 @@ public:
     iterator find(const key_type &key) noexcept {
         if (!controls_ || size_ == 0) return end();
         SizeT hash_result = hash_key(key);
-        size_type index = find_index(key, hash_result);
+        control_t short_hash_result = detail::short_hash(hash_result);
+        size_type index = find_index(key, hash_result, short_hash_result);
         if (index == npos) return end();
         return iterator(this, index);
     }
@@ -437,7 +435,8 @@ public:
     const_iterator find(const key_type &key) const noexcept {
         if (!controls_ || size_ == 0) return cend();
         SizeT hash_result = hash_key(key);
-        size_type index = find_index(key, hash_result);
+        control_t short_hash_result = detail::short_hash(hash_result);
+        size_type index = find_index(key, hash_result, short_hash_result);
         if (index == npos) return cend();
         return const_iterator(this, index);
     }
@@ -483,14 +482,13 @@ public:
         control_t short_hash_result = detail::short_hash(hash_result);
         auto [index, found] = find_or_prepare_insert(value.first, hash_result, short_hash_result);
         if (found) return {iterator(this, index), false};
-        // TODO: 此处 move(value.first) 仍然是拷贝，修改结构来实现真正移动
         emplace_at_index(index, short_hash_result, std::move(value.first), std::move(value.second));
         return {iterator(this, index), true};
     }
 
     // 插入或者赋值，return true = insert, false = assign
-    template <typename M>                                // 注意，这里 mapped_type 和 ValueType 已经是固定的类型，&&
-                                                         // 不再是万能引用，所以需要一个新的模板参数
+    template <typename M>                                // 这里 mapped_type / ValueType 已是固定类型，&&
+                                                         // 不是万能引用，需要一个新的模板参数
         requires std::constructible_from<mapped_type, M> // 防止乱传
     std::pair<iterator, bool> insert_or_assign(const key_type &key, M &&mapped) {
         SizeT hash_result = hash_key(key);
@@ -516,17 +514,18 @@ public:
         return {iterator(this, index), true};
     }
 
-    // 继承 stl 签名，返回删除了几个元素（感谢发明 multi 系列的家伙）
+    // 继承 stl 签名，返回删除了几个元素
     size_type erase(const key_type &key) {
         if (!controls_ || size_ == 0) return 0;
         SizeT hash_result = hash_key(key);
-        size_type index = find_index(key, hash_result);
+        control_t short_hash_result = detail::short_hash(hash_result);
+        size_type index = find_index(key, hash_result, short_hash_result);
         if (index == npos) return 0;
         erase_at_index(index);
         return 1;
     }
 
-    // 按值传递就行，就俩字段
+    // 按值传递
     iterator erase(iterator pos) {
         if (pos == end()) return pos;
         size_type index = pos.index_;
@@ -560,7 +559,7 @@ private:
     size_type deleted_ = 0;
     float max_load_factor_ = detail::k_default_max_load_factor;
 
-    using control_allocator_type = std::allocator<control_t>; // 我们自己确定由 std::allocator 来，不用 traits 包装
+    using control_allocator_type = std::allocator<control_t>; // 确定由 std::allocator 来，不用 traits 包装
     control_allocator_type control_alloc_{};
 
     SizeT hash_key(const key_type &key) const noexcept { return hasher_(key); }
@@ -586,7 +585,7 @@ private:
     }
 
     void destroy_all() noexcept {
-        if (!slots_) return;
+        if (size_ == 0) return; // == !slots_ || !controls_
         for (size_type index = 0; index < capacity_; ++index) {
             control_t control_byte = controls_[index];
             if (control_byte == detail::k_empty || control_byte == detail::k_deleted) continue;
@@ -595,23 +594,22 @@ private:
     }
 
     // 接收 hash result 快速计算探测起点，避免再次 hash
-    size_type find_index(const key_type &key, SizeT hash_result) const noexcept {
+    size_type find_index(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
         if (capacity_ == 0) return npos;
-        control_t short_hash_result = detail::short_hash(hash_result);
         size_type mask = capacity_ - 1;
         size_type index = static_cast<size_type>(hash_result) & mask; // 探测起点
 
-        for (size_type probe = 0; probe < capacity_; ++probe) { // 最多往前探测 capacity 步
-            control_t control_byte = controls_[index];          // 下面会更新 index，别急
-            if (control_byte == detail::k_empty) return npos;   // EMPTY 直接返回没找到
-            // DELETED 也会继续找，但是不用关注 DELETED 位，因为现在不是在插入
+        for (size_type probe = 0; probe < capacity_; ++probe) { // 最多探测 capacity 步
+            control_t control_byte = controls_[index];          // 下面更新 index
+            if (control_byte == detail::k_empty) return npos;   // EMPTY = 没找到
+            // DELETED 会继续找
             if (control_byte == short_hash_result) {
-                const key_type &stored_key = slots_[index].kv.first; // 当前指纹匹配的槽位的键值对里的键
-                if (equal_(stored_key, key)) return index;           // 比较器判等
+                const key_type &stored_key = slots_[index].kv.first;
+                if (equal_(stored_key, key)) return index;
             }
             index = (index + 1) & mask; // 避免模运算，自动回滚到起点
         }
-        return npos; // 探测完整个 capacity_ 都没找到
+        return npos; // 探测完整个 map 都没找到
     }
 
     // 给定 key，若存在于表中，返回其 index，否则返回可插入的位置
@@ -619,7 +617,7 @@ private:
         requires std::constructible_from<key_type, K>
     [[nodiscard]] std::pair<size_type, bool> find_or_prepare_insert(const K &key, SizeT hash_result,
                                                                     control_t short_hash_result) {
-        // 首次插入时建表
+        // 首次插入时必定需要扩容
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
         size_type mask = capacity_ - 1;
         size_type index = static_cast<size_type>(hash_result) & mask;
@@ -631,9 +629,8 @@ private:
                 size_type insert_index = (first_deleted != npos) ? first_deleted : index;
                 size_type used = size_ + deleted_;
                 // + 1 给新的还未被插入的元素做准备
-                if (capacity_ == 0 || static_cast<float>(used + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
-                    size_type new_capacity = capacity_ == 0 ? detail::k_min_capacity : capacity_ * 2;
-                    rehash(new_capacity);
+                if (static_cast<float>(used + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
+                    rehash(capacity_ * 2);
                     // 不得不再走一遍，因为表的结构已经改变
                     return find_or_prepare_insert(key, hash_result, short_hash_result);
                 }
@@ -647,14 +644,14 @@ private:
             }
             index = (index + 1) & mask;
         }
-        throw std::logic_error("no empty slot found"); // 反思一下为什么会到这里
+        throw std::logic_error("no empty slot found"); // 不会到这里
     }
 
     template <typename K, typename M>
         requires(std::constructible_from<key_type, K> && std::constructible_from<mapped_type, M>)
     void emplace_at_index(size_type index, control_t short_hash_result, K &&key, M &&mapped) {
         std::construct_at(std::addressof(slots_[index].kv),
-                          std::piecewise_construct,                    // 分片构造避免临时对象
+                          std::piecewise_construct,                    // 分片构造
                           std::forward_as_tuple(std::forward<K>(key)), //
                           std::forward_as_tuple(std::forward<M>(mapped)));
         controls_[index] = short_hash_result;
@@ -666,9 +663,8 @@ private:
         controls_[index] = detail::k_deleted;
         --size_;
         ++deleted_;
-        if (deleted_ > size_ && size_ > 0) {
-            // 墓碑太多，重建表
-            rehash(capacity_); // 不用动 capacity，仅清理墓碑
+        if (deleted_ > size_ && size_ > 0) { // 墓碑太多，重建表
+            rehash(capacity_);               // 不改 capacity，仅清理墓碑
         }
     }
 }; // flat_hash_map
