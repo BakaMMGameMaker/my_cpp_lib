@@ -453,20 +453,7 @@ public:
 
         deleted_ = 0; // rehash 之后不会有任何墓碑
 
-        // 搬迁旧元素
-        for (size_type index = 0; index < old_capacity; ++index) {
-            control_t control_byte = old_controls[index];
-            if (control_byte == detail::k_empty || control_byte == detail::k_deleted) continue;
-            value_type &kv = old_slots[index].kv;
-            size_type hash_result = hash_key(kv.first);
-            control_t short_hash_result = detail::short_hash(hash_result);
-            size_type insert_index = find_insert_index_for_rehash(hash_result);
-            emplace_at_index(insert_index, short_hash_result, std::move(kv.first), std::move(kv.second));
-            std::destroy_at(std::addressof(kv)); // 调用析构函数
-        }
-        // 下面的是合法的
-        control_alloc_.deallocate(old_controls, old_capacity);
-        slot_alloc_traits::deallocate(slot_alloc_, old_slots, old_capacity);
+        move_old_elements(old_controls, old_slots, old_capacity);
     }
 
     iterator begin() noexcept {
@@ -682,6 +669,22 @@ private:
         }
     }
 
+    // 只负责搬迁旧位置元素到新位置并归还旧空间，在 allocate_storage 后调用
+    void move_old_elements(control_t *old_controls, Slot *old_slots, size_type old_capacity) {
+        for (size_type index = 0; index < old_capacity; ++index) {
+            control_t control_byte = old_controls[index];
+            if (control_byte == detail::k_empty || control_byte == detail::k_deleted) continue;
+            value_type &kv = old_slots[index].kv;
+            size_type hash_result = hash_key(kv.first);
+            control_t short_hash_result = detail::short_hash(hash_result);
+            size_type insert_index = find_insert_index_for_rehash(hash_result);
+            emplace_at_index(insert_index, short_hash_result, std::move(kv.first), std::move(kv.second));
+            std::destroy_at(std::addressof(kv)); // 调用析构函数
+        }
+        control_alloc_.deallocate(old_controls, old_capacity);
+        slot_alloc_traits::deallocate(slot_alloc_, old_slots, old_capacity);
+    }
+
     // 专门为 find_or_prepare_insert 准备的快 rehash 路径，由 deleted > size_ * alpha 触发
     // 确保 capacity >= default min capacity
     void cleanup_rehash() {
@@ -701,18 +704,7 @@ private:
         auto old_capacity = capacity_;
         allocate_storage(capacity_); // 里面重置上面三者，所以需要提前保存
 
-        for (size_type index = 0; index < old_capacity; ++index) {
-            control_t control_byte = old_controls[index];
-            if (control_byte == detail::k_empty || control_byte == detail::k_deleted) continue;
-            value_type &kv = old_slots[index].kv;
-            size_type hash_result = hash_key(kv.first);
-            control_t short_hash_result = detail::short_hash(hash_result);
-            size_type insert_index = find_insert_index_for_rehash(hash_result);
-            emplace_at_index(insert_index, short_hash_result, std::move(kv.first), std::move(kv.second));
-            std::destroy_at(std::addressof(kv)); // 调用析构函数
-        }
-        control_alloc_.deallocate(old_controls, old_capacity);
-        slot_alloc_traits::deallocate(slot_alloc_, old_slots, old_capacity);
+        move_old_elements(old_controls, old_slots, old_capacity);
     }
 
     // 专门为 find_or_prepare_insert 准备的快 rehash 路径，确保 capacity >= k min capacity
@@ -727,19 +719,7 @@ private:
 
         deleted_ = 0; // rehash 之后不会有任何墓碑
 
-        // 搬迁旧元素
-        for (size_type index = 0; index < old_capacity; ++index) {
-            control_t control_byte = old_controls[index];
-            if (control_byte == detail::k_empty || control_byte == detail::k_deleted) continue;
-            value_type &kv = old_slots[index].kv;
-            size_type hash_result = hash_key(kv.first);
-            control_t short_hash_result = detail::short_hash(hash_result);
-            size_type insert_index = find_insert_index_for_rehash(hash_result);
-            emplace_at_index(insert_index, short_hash_result, std::move(kv.first), std::move(kv.second));
-            std::destroy_at(std::addressof(kv)); // 调用析构函数
-        }
-        control_alloc_.deallocate(old_controls, old_capacity);
-        slot_alloc_traits::deallocate(slot_alloc_, old_slots, old_capacity);
+        move_old_elements(old_controls, old_slots, old_capacity);
     }
 
     // 返回 key 的 index
@@ -774,7 +754,7 @@ private:
         throw std::logic_error("flat_hash_map::rehash: no empty slot found");
     }
 
-    // 给定 key，存在则返回其 index，否则返回可插入位置，别找到空位不插，里面提前更新属性了
+    // 给定 key，存在则返回其 index，否则返回可插入位置，提前更新成员，所以别找到空位不插
     template <typename K>
         requires std::constructible_from<key_type, K>
     [[nodiscard]] std::pair<size_type, bool> find_or_prepare_insert(const K &key, SizeT hash_result,
@@ -815,7 +795,7 @@ private:
         throw std::logic_error("no empty slot found"); // 不会到这里
     }
 
-    // 在指定位置上填充指纹和 kv，不会更新 size_
+    // 在指定位置上填充指纹并构造 kv，不更新 size_
     template <typename K, typename M>
         requires(std::constructible_from<key_type, K> && std::constructible_from<mapped_type, M>)
     void emplace_at_index(size_type index, control_t short_hash_result, K &&key, M &&mapped) {
@@ -826,6 +806,7 @@ private:
         controls_[index] = short_hash_result;
     }
 
+    // 调用 index 处 kv 析构，标记为墓碑，更新 size_ 和 deleted_
     void erase_at_index(size_type index) noexcept {
         std::destroy_at(std::addressof(slots_[index].kv));
         controls_[index] = detail::k_deleted;
