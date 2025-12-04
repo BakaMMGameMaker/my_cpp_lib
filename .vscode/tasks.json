@@ -2,44 +2,47 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "format",
+            "label": "configure",
             "type": "shell",
-            "command": "clang-format -i ${file}"
-        },
-        {
-            "label": "tidy",
-            "type": "shell",
-            "command": "clang-tidy ${file} -- -std=c++23"
+            "command": "cmake",
+            "args": [
+                "-S",
+                ".",
+                "-B",
+                "build",
+                "-G",
+                "Ninja",
+                "-DCMAKE_C_COMPILER=E:/LLVM/bin/clang.exe",
+                "-DCMAKE_CXX_COMPILER=E:/LLVM/bin/clang++.exe"
+            ],
+            "group": "build"
         },
         {
             "label": "build",
             "type": "shell",
-            "command": "clang++",
+            "command": "cmake",
             "args": [
-                "-std=c++23",
-                "-O2",
-                "${file}",
-                "-o",
-                "${fileDirname}/${fileBasenameNoExtension}.exe",
-                "-I",
-                "D:/allfolders/code/advanced/cpp/my_cpp_lib/",
-                "-Wall",
-                "-Wextra",
+                "--build",
+                "build",
+                "--config",
+                "Release"
+            ],
+            "group": "build",
+            "dependsOn": [
+                "configure"
             ]
         },
         {
-            "label": "run",
+            "label": "run flat_hash_map_basic",
             "type": "shell",
-            "command": "${fileDirname}/${fileBasenameNoExtension}.exe"
+            "command": "build/flat_hash_map_basic.exe",
+            "group": "test"
         },
         {
-            "label": "full-pipeline",
+            "label": "full",
             "dependsOn": [
-                // "format",
-                // "tidy",
-                "build",
+                "build"
             ],
-            "dependsOrder": "sequence",
             "group": {
                 "kind": "build",
                 "isDefault": true

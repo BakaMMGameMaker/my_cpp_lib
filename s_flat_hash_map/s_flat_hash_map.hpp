@@ -13,7 +13,7 @@
 #include <type_traits>
 #include <utility>
 
-namespace sflat {
+namespace mcl {
 
 namespace detail {
 // 定义控制字节 control_t = UInt8，有利于 SIMD，并避免花费过多时间比对 key
@@ -40,8 +40,9 @@ inline constexpr bool is_power_of_two(SizeT x) noexcept {
 
 // >= x 的下一个 2 的次幂
 // 666 谁写的代码返回值是 bool 已 fixed
+// 不要传 <= 1 的值进来，0 分支
 inline constexpr SizeT next_power_of_two(SizeT x) noexcept {
-    if (x <= 1) return 1; // 2^0 = 1
+    // if (x <= 1) return 1; // 2^0 = 1
     // 通过扩散最高位，避免循环带来的分支，完全内联，缓存友好，更加高效
     --x; // 防止原本就是 2 的次幂的数字跳转到下一个数
     // 往低位扩散最高位
@@ -101,6 +102,7 @@ public:
     // k deleted = 0xfe
     // k min capacity = 8
     // k default max load factor = .875
+    // 外部注意事项：为了让 next power of two 0 分支，不要给它传入 <= 1 的值
     using key_type = KeyType;
     using mapped_type = ValueType;
     using value_type = std::pair<KeyType, ValueType>; // it->first = new_key 是用户的锅，不是我的
@@ -308,8 +310,8 @@ public:
                                               slot_alloc_traits::is_always_equal::value) {
         if (this == &other) return *this;
         // 准备原封不动地照搬对方的状态
-        destroy_all();
-        deallocate_storage();
+        if (size_ > 0) destroy_all();
+        if (capacity_ > 0) deallocate_storage();
         if constexpr (slot_alloc_traits::propagate_on_container_move_assignment::value) {
             alloc_ = std::move(other.alloc_);
             slot_alloc_ = std::move(other.slot_alloc_);
@@ -332,8 +334,8 @@ public:
     }
 
     ~flat_hash_map() {
-        destroy_all();
-        deallocate_storage();
+        if (size_ > 0) destroy_all();
+        if (capacity_ > 0) deallocate_storage();
     }
 
     allocator_type get_allocator() const noexcept { return alloc_; }
@@ -351,14 +353,16 @@ public:
 
     // properties setter
     void max_load_factor(float load_factor) {
-        if (load_factor <= 0.0f) throw std::invalid_argument("flat_hash_map::max_load_factor: load_factor must be > 0");
+        // clamp
+        if (load_factor < 0.50f) load_factor = 0.50f;
+        if (load_factor > 0.95f) load_factor = 0.95f;
         max_load_factor_ = load_factor;
         // 不主动 rehash
     }
 
     // 不仅销毁全部 kv，还重置所有槽位为 empty
     void clear() noexcept {
-        destroy_all();
+        if (size_ > 0) destroy_all();
         if (controls_)
             for (size_type index = 0; index < capacity_; ++index) controls_[index] = detail::k_empty;
         size_ = 0;
@@ -367,7 +371,10 @@ public:
 
     // 预留空间
     void reserve(size_type new_size) {
-        size_type min_capacity = std::ceil(static_cast<size_type>(static_cast<float>(new_size) / max_load_factor_));
+        float need = static_cast<float>(new_size) / max_load_factor_;
+        size_type min_capacity = static_cast<size_type>(std::ceil(need));
+        if (min_capacity < detail::k_min_capacity) min_capacity = detail::k_min_capacity;
+        // 这里不需要 next power of two，rehash 里会调用
         if (min_capacity <= capacity_) return;
         rehash(min_capacity);
     }
@@ -394,27 +401,55 @@ public:
         swap(max_load_factor_, other.max_load_factor_);
     }
 
-    // 重哈希
+    // 接收期望容量并重哈希，无活跃元素且 rehash(0) 时变为空 map
     void rehash(size_type new_capacity) {
-        if (size_ == 0) {
-            deallocate_storage();          // 归还原来的空间
-            if (new_capacity == 0) return; // 不申请任何空间
-            // new cap = 2 ^ n (n >= 3)
-            new_capacity = std::max(new_capacity, detail::k_min_capacity);
-            new_capacity = detail::next_power_of_two(new_capacity);
+        // 注意语义是 capacity 不是 size
+
+        // 原本无 storage
+        if (capacity_ == 0) {
+            if (new_capacity == 0) return; // 空 map rehash 0
+            if (new_capacity <= detail::k_min_capacity) new_capacity = detail::k_min_capacity;
+            else new_capacity = detail::next_power_of_two(new_capacity);
             allocate_storage(new_capacity);
             return;
         }
 
-        new_capacity = std::max(new_capacity, size_);                  // new cap >= size_
-        new_capacity = std::max(new_capacity, detail::k_min_capacity); // new cap >= 8
-        new_capacity = detail::next_power_of_two(new_capacity);        // new cap = 2 ^ n
+        // 原本有 storage 但无活跃元素
+        if (size_ == 0) {
+            deallocate_storage();
+            controls_ = nullptr;
+            slots_ = nullptr;
+            deleted_ = 0;
+            if (new_capacity == 0) { // 无活跃元素且 rehash(0) -> 空 map
+                capacity_ = 0;
+                return;
+            }
+            if (new_capacity <= detail::k_min_capacity) new_capacity = detail::k_min_capacity;
+            else new_capacity = detail::next_power_of_two(new_capacity);
+            allocate_storage(new_capacity); // 内部更新 capacity_ = new_capacity
+            return;
+        }
+
+        // capacity_ > 0 and size_ > 0，不允许缩容
+
+        if (new_capacity <= capacity_) {
+            new_capacity = capacity_;
+        } else {
+            if (new_capacity <= detail::k_min_capacity) new_capacity = detail::k_min_capacity;
+            else new_capacity = detail::next_power_of_two(new_capacity);
+        }
+
+        // 到这里：
+        // 第一种可能：capacity = new capacity > 0
+        // 第二种可能：new capacity = 2^n > capacity
+
+        // 优化：如果新旧容量一致且没有墓碑，什么也不做
+        if (new_capacity == capacity_ && deleted_ == 0) return;
 
         auto old_controls = controls_;
         auto old_slots = slots_;
         auto old_capacity = capacity_;
-
-        allocate_storage(new_capacity);
+        allocate_storage(new_capacity); // 里面重置上面三者，所以需要提前保存
 
         size_ = 0;    // insert 会增 size_，提前归零
         deleted_ = 0; // rehash 之后不会有任何墓碑
@@ -424,13 +459,15 @@ public:
             control_t control_byte = old_controls[index];
             if (control_byte == detail::k_empty || control_byte == detail::k_deleted) continue;
             value_type &kv = old_slots[index].kv;
-            insert(std::move(kv)); // 移动而非拷贝
-            // &kv = &old_slots[index].kv，不是栈地址
-            std::destroy_at(std::addressof(kv)); // destroy at 相当于调用析构函数
+            size_type hash_result = hash_key(kv.first);
+            control_t short_hash_result = detail::short_hash(hash_result);
+            size_type insert_index = find_insert_index_for_rehash(hash_result);
+            emplace_at_index(insert_index, short_hash_result, std::move(kv.first), std::move(kv.second));
+            std::destroy_at(std::addressof(kv)); // 调用析构函数
         }
-
-        if (old_controls) control_alloc_.deallocate(old_controls, old_capacity);
-        if (old_slots) slot_alloc_traits::deallocate(slot_alloc_, old_slots, old_capacity);
+        // 下面的是合法的
+        control_alloc_.deallocate(old_controls, old_capacity);
+        slot_alloc_traits::deallocate(slot_alloc_, old_slots, old_capacity);
     }
 
     iterator begin() noexcept {
@@ -617,6 +654,7 @@ private:
 
     SizeT hash_key(const key_type &key) const noexcept { return hasher_(key); }
 
+    // 仅开空间，更新 capacity_，新地方全设为 empty
     void allocate_storage(size_type capacity) {
         controls_ = control_alloc_.allocate(capacity);
         slots_ = slot_alloc_traits::allocate(slot_alloc_, capacity);
@@ -625,20 +663,14 @@ private:
         for (size_type index = 0; index < capacity; ++index) { controls_[index] = detail::k_empty; }
     }
 
+    // 仅释放空间，不重置任何成员，保证 capacity > 0 再调用
     void deallocate_storage() noexcept {
-        if (controls_) {
-            control_alloc_.deallocate(controls_, capacity_);
-            controls_ = nullptr;
-        }
-        if (slots_) {
-            slot_alloc_traits::deallocate(slot_alloc_, slots_, capacity_);
-            slots_ = nullptr;
-        }
-        capacity_ = 0;
+        control_alloc_.deallocate(controls_, capacity_);
+        slot_alloc_traits::deallocate(slot_alloc_, slots_, capacity_);
     }
 
+    // 仅转一整个 map 摧毁所有活跃 kv
     void destroy_all() noexcept {
-        if (size_ == 0) return; // == !slots_ || !controls_ 防止空转
         for (size_type index = 0; index < capacity_; ++index) {
             control_t control_byte = controls_[index];
             if (control_byte == detail::k_empty || control_byte == detail::k_deleted) continue;
@@ -665,7 +697,20 @@ private:
         return npos; // 探测完整个 map 都没找到
     }
 
-    // 给定 key，存在则返回其 index，否则返回可插入位置
+    // rehash 搬迁元素专用，allocate_storage 更新 capacity_ 后使用，别让容量为 0
+    size_type find_insert_index_for_rehash(SizeT hash_result) {
+        // 暂时不需要 short hash result，别乱传
+        size_type mask = capacity_ - 1;
+        size_type index = static_cast<size_type>(hash_result) & mask;
+        for (size_type probe = 0; probe < capacity_; ++probe) {
+            control_t control_byte = controls_[index];
+            if (control_byte == detail::k_empty) return index; // 新地方没墓碑，别乱来
+            index = (index + 1) & mask;
+        }
+        throw std::logic_error("flat_hash_map::rehash: no empty slot found");
+    }
+
+    // 给定 key，存在则返回其 index，否则返回可插入位置，别找到空位不插，里面提前更新属性了
     template <typename K>
         requires std::constructible_from<key_type, K>
     [[nodiscard]] std::pair<size_type, bool> find_or_prepare_insert(const K &key, SizeT hash_result,
@@ -679,14 +724,17 @@ private:
             control_t control_byte = controls_[index];
             if (control_byte == detail::k_empty) { // key 的确不存在，需要占用新位置
                 // 遇到过 DELETED，重用墓碑，不 rehash
-                if (first_deleted != npos) return {first_deleted, false};
-                // 没有墓碑可用，准备占用 EMPTY 槽位
-                // - 如果当前墓碑太多，先重哈希清理墓碑
-                // - 否则扩容
+                if (first_deleted != npos) {
+                    --deleted_; // 提前更新
+                    return {first_deleted, false};
+                }
+                // 无墓碑，占用 EMPTY，若墓碑太多，以当前容量重哈希，否则扩容一倍
                 size_type used = size_ + deleted_; // 已占用 = size + 墓碑
                 // + 1 给新的还未被插入的元素做准备
                 if (static_cast<float>(used + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
-                    if (deleted_ > size_ && size_ > 0) rehash(capacity_);               // 清理墓碑
+                    // TODO: deleted > size * alpha
+                    // 清理墓碑别放外面，不然没事就重哈希，和傻逼一样
+                    if (deleted_ > size_ && size_ > 0) rehash(capacity_);
                     else rehash(capacity_ * 2);                                         // 扩容
                     return find_or_prepare_insert(key, hash_result, short_hash_result); // 表的结构已经改变，再走一遍
                 }
@@ -703,18 +751,16 @@ private:
         throw std::logic_error("no empty slot found"); // 不会到这里
     }
 
+    // 在指定位置上填充指纹和 kv，size + 1
     template <typename K, typename M>
         requires(std::constructible_from<key_type, K> && std::constructible_from<mapped_type, M>)
     void emplace_at_index(size_type index, control_t short_hash_result, K &&key, M &&mapped) {
-        control_t &control_byte = controls_[index];
-        bool was_deleted = control_byte == detail::k_deleted;
         std::construct_at(std::addressof(slots_[index].kv),
                           std::piecewise_construct,                    // 分片构造
                           std::forward_as_tuple(std::forward<K>(key)), //
                           std::forward_as_tuple(std::forward<M>(mapped)));
         controls_[index] = short_hash_result;
-        ++size_;
-        deleted_ -= was_deleted;
+        ++size_; // 这是 100% 发生的，放这里就行
     }
 
     void erase_at_index(size_type index) noexcept {
@@ -743,4 +789,4 @@ private:
 
     friend void swap(flat_hash_map &lhs, flat_hash_map &rhs) noexcept(noexcept(lhs.swap(rhs))) { lhs.swap(rhs); }
 }; // flat_hash_map
-} // namespace sflat
+} // namespace mcl

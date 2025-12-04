@@ -1,8 +1,7 @@
-// tests/flat_hash_map_basic.cpp
+// my_cpp_lib/s_flat_hash_map/tests/flat_hash_map_basic.cpp
+#include "s_flat_hash_map/s_flat_hash_map.hpp"
 #include "salias.h"
-#include "sflatmap/sflatmap.hpp"
 #include <cassert>
-#include <functional>
 #include <iostream>
 #include <iterator>
 #include <memory>
@@ -51,7 +50,7 @@ template <typename T> struct CountingAllocator {
 
 // 基础行为测试
 static void test_basic_operations() {
-    using map_t = sflat::flat_hash_map<UInt32, UInt32>;
+    using map_t = mcl::flat_hash_map<UInt32, UInt32>;
     map_t m;
     assert(m.empty()); // 初始建表为空
     assert(m.size() == 0);
@@ -137,7 +136,7 @@ static void test_basic_operations() {
 }
 
 static void test_high_collision() {
-    using map_t = sflat::flat_hash_map<UInt32, UInt32, bad_hash_u32>;
+    using map_t = mcl::flat_hash_map<UInt32, UInt32, bad_hash_u32>;
     map_t m;
     constexpr SizeT N = 128;
     for (UInt32 i = 0; i < N; ++i) {
@@ -173,7 +172,7 @@ static void test_high_collision() {
 
 // max load factor / rehash
 static void test_load_factor_and_rehash() {
-    using map_t = sflat::flat_hash_map<UInt32, UInt32>;
+    using map_t = mcl::flat_hash_map<UInt32, UInt32>;
     map_t m;
     m.max_load_factor(0.5f);
     m.reserve(8);
@@ -197,7 +196,7 @@ static void test_load_factor_and_rehash() {
 }
 
 static void test_insert_erase_insert_cycle() {
-    using map_t = sflat::flat_hash_map<UInt32, UInt32>;
+    using map_t = mcl::flat_hash_map<UInt32, UInt32>;
 
     map_t m;
     m.max_load_factor(0.75f);
@@ -230,7 +229,7 @@ static void test_insert_erase_insert_cycle() {
 }
 
 static void test_iterators() {
-    using map_t = sflat::flat_hash_map<std::uint32_t, std::uint32_t>;
+    using map_t = mcl::flat_hash_map<std::uint32_t, std::uint32_t>;
 
     map_t m;
 
@@ -279,7 +278,7 @@ static void test_iterators() {
 static void test_allocator_behavior() {
     using value_type = std::pair<UInt32, UInt32>;
     using map_t =
-        sflat::flat_hash_map<UInt32, UInt32, std::hash<UInt32>, std::equal_to<UInt32>, CountingAllocator<value_type>>;
+        mcl::flat_hash_map<UInt32, UInt32, std::hash<UInt32>, std::equal_to<UInt32>, CountingAllocator<value_type>>;
 
     AllocStats::reset();
     {
