@@ -451,7 +451,6 @@ public:
         auto old_capacity = capacity_;
         allocate_storage(new_capacity); // 里面重置上面三者，所以需要提前保存
 
-        size_ = 0;    // insert 会增 size_，提前归零
         deleted_ = 0; // rehash 之后不会有任何墓碑
 
         // 搬迁旧元素
@@ -529,6 +528,7 @@ public:
         control_t short_hash_result = detail::short_hash(hash_result);
         auto [index, found] = find_or_prepare_insert(key, hash_result, short_hash_result);
         if (!found) emplace_at_index(index, short_hash_result, key, mapped_type{});
+        ++size_;
         return slots_[index].kv.second; // 可直接作为等号左侧内容赋值
     }
 
@@ -538,6 +538,7 @@ public:
         control_t short_hash_result = detail::short_hash(hash_result);
         auto [index, found] = find_or_prepare_insert(key, hash_result, short_hash_result);
         if (!found) emplace_at_index(index, short_hash_result, std::move(key), mapped_type{});
+        ++size_;
         return slots_[index].kv.second;
     }
 
@@ -551,6 +552,7 @@ public:
         auto [index, found] = find_or_prepare_insert(value.first, hash_result, short_hash_result);
         if (found) return {iterator(this, index), false};
         emplace_at_index(index, short_hash_result, std::move(value.first), std::move(value.second));
+        ++size_;
         return {iterator(this, index), true};
     }
 
@@ -567,6 +569,7 @@ public:
             return {iterator(this, index), false}; // assign -> false
         }
         emplace_at_index(index, short_hash_result, key, std::forward<M>(mapped));
+        ++size_;
         return {iterator(this, index), true};
     }
 
@@ -580,6 +583,7 @@ public:
         if (found) return {iterator(this, index), false};
         // ^^^ key exists / key not exists vvv
         emplace_at_index(index, short_hash_result, std::forward<K>(key), std::forward<M>(mapped));
+        ++size_;
         return {iterator(this, index), true};
     }
 
@@ -697,8 +701,6 @@ private:
         auto old_capacity = capacity_;
         allocate_storage(capacity_); // 里面重置上面三者，所以需要提前保存
 
-        size_ = 0; // insert 会增 size_，提前归零
-
         for (size_type index = 0; index < old_capacity; ++index) {
             control_t control_byte = old_controls[index];
             if (control_byte == detail::k_empty || control_byte == detail::k_deleted) continue;
@@ -723,7 +725,6 @@ private:
         auto old_capacity = capacity_;
         allocate_storage(capacity_ * 2); // 里面重置上面三者，所以需要提前保存
 
-        size_ = 0;    // insert 会增 size_，提前归零
         deleted_ = 0; // rehash 之后不会有任何墓碑
 
         // 搬迁旧元素
@@ -814,7 +815,7 @@ private:
         throw std::logic_error("no empty slot found"); // 不会到这里
     }
 
-    // 在指定位置上填充指纹和 kv，size + 1
+    // 在指定位置上填充指纹和 kv，不会更新 size_
     template <typename K, typename M>
         requires(std::constructible_from<key_type, K> && std::constructible_from<mapped_type, M>)
     void emplace_at_index(size_type index, control_t short_hash_result, K &&key, M &&mapped) {
@@ -823,7 +824,6 @@ private:
                           std::forward_as_tuple(std::forward<K>(key)), //
                           std::forward_as_tuple(std::forward<M>(mapped)));
         controls_[index] = short_hash_result;
-        ++size_; // TODO: 放到外面去
     }
 
     void erase_at_index(size_type index) noexcept {
