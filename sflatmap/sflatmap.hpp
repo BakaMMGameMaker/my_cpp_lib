@@ -2,6 +2,7 @@
 
 #include "salias.h"
 #include <algorithm>
+#include <cmath>
 #include <concepts>
 #include <cstddef>
 #include <initializer_list>
@@ -89,8 +90,8 @@ concept EqualFor = requires(const KeyEqualType &e, const KeyType &a, const KeyTy
 } // namespace detail
 
 template <typename KeyType, typename ValueType, typename HasherType = std::hash<KeyType>,
-          typename KeyEqualType = std::equal_to<KeyType>,                 // 比较器，相当于包装了 lhs == rhs 的 functor
-          typename Alloc = std::allocator<std::pair<KeyType, ValueType>>> // key 一旦被插入就不应该被修改
+          typename KeyEqualType = std::equal_to<KeyType>, // 比较器，相当于包装了 lhs == rhs 的 functor
+          typename Alloc = std::allocator<std::pair<KeyType, ValueType>>>
     requires detail::HashKey<KeyType> && detail::HashValue<ValueType> && detail::HashFor<HasherType, KeyType> &&
              detail::EqualFor<KeyEqualType, KeyType>
 class flat_hash_map {
@@ -137,7 +138,6 @@ public:
 
         // 默认构造函数中没有调用，需在外部自行调用
         void skip_to_next_occupied() noexcept {
-            if (!map_) return;
             while (index_ < map_->capacity_) {
                 control_t control_byte = map_->controls_[index_];
                 if (control_byte != detail::k_empty && control_byte != detail::k_deleted) break;
@@ -158,7 +158,7 @@ public:
 
         iterator &operator++() noexcept {
             ++index_;
-            skip_to_next_occupied();
+            skip_to_next_occupied(); // 如果 it 没绑定到 map，UB
             return *this;
         }
 
@@ -186,7 +186,6 @@ public:
         const_iterator(const map_type *map, size_type index) noexcept : map_(map), index_(index) {}
 
         void skip_to_next_occupied() noexcept {
-            if (!map_) return;
             while (index_ < map_->capacity_) {
                 control_t control_byte = map_->controls_[index_];
                 if (control_byte != detail::k_empty && control_byte != detail::k_deleted) break;
@@ -368,7 +367,7 @@ public:
 
     // 预留空间
     void reserve(size_type new_size) {
-        size_type min_capacity = static_cast<size_type>(static_cast<float>(new_size) / max_load_factor_) + 1;
+        size_type min_capacity = std::ceil(static_cast<size_type>(static_cast<float>(new_size) / max_load_factor_));
         if (min_capacity <= capacity_) return;
         rehash(min_capacity);
     }
@@ -534,6 +533,7 @@ public:
         return {iterator(this, index), true};
     }
 
+    // 返回插入或者已存在 key 的 iterator 以及插入是否成功
     template <typename K, typename M>
         requires(std::constructible_from<key_type, K> && std::constructible_from<mapped_type, M>)
     std::pair<iterator, bool> emplace(K &&key, M &&mapped) {
@@ -561,8 +561,7 @@ public:
     iterator erase(iterator pos) {
         if (pos == end()) return end();
         size_type index = pos.index_;
-        // TODO: 或许可以提供一个重载版本 rehash，接收 old_delete_index，返回 next occupied index
-        erase_at_index(index);
+        erase_at_index(index); // erase 不负责 rehash
         iterator it(this, index);
         it.skip_to_next_occupied();
         return it;
@@ -639,7 +638,7 @@ private:
     }
 
     void destroy_all() noexcept {
-        if (size_ == 0) return; // == !slots_ || !controls_
+        if (size_ == 0) return; // == !slots_ || !controls_ 防止空转
         for (size_type index = 0; index < capacity_; ++index) {
             control_t control_byte = controls_[index];
             if (control_byte == detail::k_empty || control_byte == detail::k_deleted) continue;
