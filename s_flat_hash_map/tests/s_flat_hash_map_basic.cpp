@@ -1,5 +1,4 @@
-// my_cpp_lib/s_flat_hash_map/tests/s_flat_hash_map_basic.cpp
-// Keep asserts enabled for this test binary even if the build passes -DNDEBUG.
+// s_flat_hash_map/tests/s_flat_hash_map_basic.cpp
 #ifdef NDEBUG
 #undef NDEBUG
 #endif

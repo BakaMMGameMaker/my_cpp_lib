@@ -1,3 +1,4 @@
+// s_flat_hash_map/s_flat_hash_map.cpp
 #pragma once
 
 #include "salias.h"
@@ -12,6 +13,8 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+
+#define DEBUG
 
 namespace mcl {
 
@@ -116,6 +119,19 @@ private:
     struct Slot {
         value_type kv;
     };
+
+#ifdef DEBUG
+    struct debug_stats {
+        size_type size;
+        size_type capacity;
+        size_type deleted;
+        SizeT rehash_count;
+        SizeT cleanup_rehash_count;
+        SizeT double_rehash_count;
+        SizeT max_probe_len;
+        double avg_probe_len;
+    };
+#endif
 
     using control_t = detail::control_t;
     // 通过 allocator traits 包装 allocator type，提供作用明确的统一的接口
@@ -296,12 +312,27 @@ public:
         : hasher_(std::move(other.hasher_)), equal_(std::move(other.equal_)), alloc_(std::move(other.alloc_)),
           slot_alloc_(std::move(other.slot_alloc_)), controls_(other.controls_), slots_(other.slots_),
           capacity_(other.capacity_), size_(other.size_), deleted_(other.deleted_),
-          max_load_factor_(other.max_load_factor_) {
+          max_load_factor_(other.max_load_factor_)
+#ifdef DEBUG
+          ,
+          total_probes_(other.total_probes_), probe_ops_(other.probe_ops_), max_probe_len_(other.max_probe_len_),
+          rehash_count_(other.rehash_count_), cleanup_rehash_count_(other.cleanup_rehash_count_),
+          double_rehash_count_(other.double_rehash_count_)
+#endif
+    {
         other.controls_ = nullptr;
         other.slots_ = nullptr;
         other.capacity_ = 0;
         other.size_ = 0;
         other.deleted_ = 0;
+#ifdef DEBUG
+        other.total_probes_ = 0;
+        other.probe_ops_ = 0;
+        other.max_probe_len_ = 0;
+        other.rehash_count_ = 0;
+        other.cleanup_rehash_count_ = 0;
+        other.double_rehash_count_ = 0;
+#endif
     }
 
     // 移动赋值本质上是用对方的状态覆盖已经存在的现有的状态，所以也要检查有关 alloc 在移动赋值时的行为
@@ -324,12 +355,28 @@ public:
         size_ = other.size_;
         deleted_ = other.deleted_;
         max_load_factor_ = other.max_load_factor_;
+#ifdef DEBUG
+        total_probes_ = other.total_probes_;
+        probe_ops_ = other.probe_ops_;
+        max_probe_len_ = other.max_probe_len_;
+        rehash_count_ = other.rehash_count_;
+        cleanup_rehash_count_ = other.cleanup_rehash_count_;
+        double_rehash_count_ = other.double_rehash_count_;
+#endif
 
         other.controls_ = nullptr;
         other.slots_ = nullptr;
         other.capacity_ = 0;
         other.size_ = 0;
         other.deleted_ = 0;
+#ifdef DEBUG
+        other.total_probes_ = 0;
+        other.probe_ops_ = 0;
+        other.max_probe_len_ = 0;
+        other.rehash_count_ = 0;
+        other.cleanup_rehash_count_ = 0;
+        other.double_rehash_count_ = 0;
+#endif
         return *this;
     }
 
@@ -425,6 +472,14 @@ public:
         swap(size_, other.size_);
         swap(deleted_, other.deleted_);
         swap(max_load_factor_, other.max_load_factor_);
+#ifdef DEBUG
+        swap(total_probes_, other.total_probes_);
+        swap(probe_ops_, other.probe_ops_);
+        swap(max_probe_len_, other.max_probe_len_);
+        swap(rehash_count_, other.rehash_count_);
+        swap(cleanup_rehash_count_, other.cleanup_rehash_count_);
+        swap(double_rehash_count_, other.double_rehash_count_);
+#endif
     }
 
     // 接收期望容量并重哈希，无活跃元素且 rehash(0) 时变为空 map
@@ -437,6 +492,9 @@ public:
             if (new_capacity <= detail::k_min_capacity) new_capacity = detail::k_min_capacity;
             else new_capacity = detail::next_power_of_two(new_capacity);
             allocate_storage(new_capacity);
+#ifdef DEBUG
+            ++rehash_count_;
+#endif
             return;
         }
 
@@ -448,11 +506,17 @@ public:
                 controls_ = nullptr;
                 slots_ = nullptr;
                 capacity_ = 0;
+#ifdef DEBUG
+                ++rehash_count_;
+#endif
                 return;
             }
             if (new_capacity <= detail::k_min_capacity) new_capacity = detail::k_min_capacity;
             else new_capacity = detail::next_power_of_two(new_capacity);
             allocate_storage(new_capacity); // 内部更新 capacity_ = new_capacity，controls_ 和 slot_
+#ifdef DEBUG
+            ++rehash_count_;
+#endif
             return;
         }
 
@@ -476,6 +540,9 @@ public:
         auto old_capacity = capacity_;
         allocate_storage(new_capacity); // 里面重置上面三者，所以需要提前保存
         deleted_ = 0;                   // rehash 之后不会有任何墓碑
+#ifdef DEBUG
+        ++rehash_count_;
+#endif
         move_old_elements(old_controls, old_slots, old_capacity);
     }
 
@@ -648,7 +715,7 @@ public:
         return 1;
     }
 
-    // 按值传递
+    // 移除迭代器指向的键值对并返回指向下一个键值对的迭代器
     iterator erase(iterator pos) {
         if (pos == end()) return end();
         size_type index = pos.index_;
@@ -658,6 +725,7 @@ public:
         return it;
     }
 
+    // 移除迭代器指向的键值对并返回指向下一个键值对的迭代器
     iterator erase(const_iterator pos) {
         if (pos == end()) return end();
         size_type index = pos.index_;
@@ -667,7 +735,7 @@ public:
         return it;
     }
 
-    // 区间擦除
+    // 移除给定迭代器区间范围内的所有键值对
     iterator erase(const_iterator first, const_iterator last) {
         // 不检查是否来自当前 map，UB 是用户自己的锅
         if (first == last) return iterator(this, first.index_);
@@ -688,6 +756,22 @@ public:
         return it;
     }
 
+#ifdef DEBUG
+    [[nodiscard]] debug_stats get_debug_stats() const noexcept {
+        // clang-format off
+        return debug_stats {
+            size_,
+            capacity_,
+            deleted_,
+            rehash_count_,
+            cleanup_rehash_count_,
+            double_rehash_count_,
+            max_probe_len_,
+            probe_ops_ == 0 ? 0.0 : static_cast<double>(total_probes_) / static_cast<double>(probe_ops_)};
+        // clang-format on
+    }
+#endif
+
 private:
     static constexpr size_type npos = static_cast<size_type>(-1);
 
@@ -705,6 +789,21 @@ private:
 
     using control_allocator_type = std::allocator<control_t>; // 确定由 std::allocator 来，不用 traits 包装
     control_allocator_type control_alloc_{};
+
+#ifdef DEBUG
+    mutable SizeT total_probes_ = 0;         // 探测总长度
+    mutable SizeT probe_ops_ = 0;            // 探测次数
+    mutable SizeT max_probe_len_ = 0;        // 历史最大探测长度
+    mutable SizeT rehash_count_ = 0;         // rehash 次数
+    mutable SizeT cleanup_rehash_count_ = 0; // 墓碑清理次数
+    mutable SizeT double_rehash_count_ = 0;  // 扩容次数
+
+    void record_probe(SizeT probe_len) const noexcept {
+        total_probes_ += probe_len;
+        ++probe_ops_;
+        if (probe_len > max_probe_len_) max_probe_len_ = probe_len;
+    }
+#endif
 
     SizeT hash_key(const key_type &key) const noexcept { return hasher_(key); }
 
@@ -752,6 +851,10 @@ private:
     // 确保 capacity >= default min capacity
     void cleanup_rehash() {
         deleted_ = 0; // 清理后一定没有墓碑
+#ifdef DEBUG
+        ++cleanup_rehash_count_;
+        ++rehash_count_;
+#endif
         // 原本有 storage 但没有活跃元素
         if (size_ == 0) {
             deallocate_storage();
@@ -775,6 +878,10 @@ private:
         auto old_capacity = capacity_;
         allocate_storage(capacity_ * 2);
         deleted_ = 0; // 清理后一定没有墓碑
+#ifdef DEBUG
+        ++double_rehash_count_;
+        ++rehash_count_;
+#endif
         move_old_elements(old_controls, old_slots, old_capacity);
     }
 
@@ -783,17 +890,35 @@ private:
         if (capacity_ == 0) return npos;
         size_type mask = capacity_ - 1;
         size_type index = static_cast<size_type>(hash_result) & mask; // 探测起点
-
+#ifdef DEBUG
+        SizeT probe_len = 0;
+#endif
         for (size_type probe = 0; probe < capacity_; ++probe) { // 最多探测 capacity 步
-            control_t control_byte = controls_[index];          // 下面更新 index
-            if (control_byte == detail::k_empty) return npos;   // EMPTY = 没找到
+#ifdef DEBUG
+            ++probe_len;
+#endif
+            control_t control_byte = controls_[index];
+            if (control_byte == detail::k_empty) {
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return npos; // EMPTY = 没找到
+            }
             // DELETED 会继续找
             if (control_byte == short_hash_result) {
                 const key_type &stored_key = slots_[index].kv.first;
-                if (equal_(stored_key, key)) return index;
+                if (equal_(stored_key, key)) {
+#ifdef DEBUG
+                    record_probe(probe_len);
+#endif
+                    return index;
+                }
             }
             index = (index + 1) & mask; // 避免模运算，自动回滚到起点
         }
+#ifdef DEBUG
+        record_probe(probe_len);
+#endif
         return npos; // map 中无 key
     }
 
@@ -802,9 +927,20 @@ private:
         // 暂时不需要 short hash result，别乱传
         size_type mask = capacity_ - 1;
         size_type index = static_cast<size_type>(hash_result) & mask;
+#ifdef DEBUG
+        SizeT probe_len = 0;
+#endif
         for (size_type probe = 0; probe < capacity_; ++probe) {
+#ifdef DEBUG
+            ++probe_len;
+#endif
             control_t control_byte = controls_[index];
-            if (control_byte == detail::k_empty) return index; // 新地方没墓碑，别乱来
+            if (control_byte == detail::k_empty) { // 新地方没墓碑
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return index;
+            }
             index = (index + 1) & mask;
         }
         throw std::logic_error("flat_hash_map::rehash: no empty slot found");
@@ -819,12 +955,20 @@ private:
         size_type mask = capacity_ - 1;
         size_type index = static_cast<size_type>(hash_result) & mask;
         size_type first_deleted = npos;
-
+#ifdef DEBUG
+        SizeT probe_len = 0;
+#endif
         for (size_type probe = 0; probe < capacity_; ++probe) {
+#ifdef DEBUG
+            ++probe_len;
+#endif
             control_t control_byte = controls_[index];
-            if (control_byte == detail::k_empty) { // key 的确不存在，需要占用新位置
+            if (control_byte == detail::k_empty) { // key 不存在，需用新位置
                 // 遇到过 DELETED，重用墓碑，不 rehash
                 if (first_deleted != npos) {
+#ifdef DEBUG
+                    record_probe(probe_len);
+#endif
                     --deleted_; // 提前更新
                     return {first_deleted, false};
                 }
@@ -833,18 +977,30 @@ private:
                 // + 1 给新的还未被插入的元素做准备
                 if (static_cast<float>(used + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
                     // TODO: deleted > size * alpha
-                    // 清理墓碑别放外面，不然没事就重哈希，和傻逼一样
+                    // 清理墓碑放里面
+
+#ifdef DEBUG
+                    record_probe(probe_len);
+#endif
                     if (deleted_ > size_ && size_ > 0) cleanup_rehash();
                     else double_storage();
                     return find_or_prepare_insert(key, hash_result, short_hash_result); // 表的结构已经改变，再走一遍
                 }
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
                 return {index, false};
             }
             if (control_byte == detail::k_deleted) {
                 if (first_deleted == npos) first_deleted = index;
             } else if (control_byte == short_hash_result) {
                 const key_type &stored_key = slots_[index].kv.first;
-                if (equal_(stored_key, key)) return {index, true};
+                if (equal_(stored_key, key)) {
+#ifdef DEBUG
+                    record_probe(probe_len);
+#endif
+                    return {index, true};
+                }
             }
             index = (index + 1) & mask;
         }
