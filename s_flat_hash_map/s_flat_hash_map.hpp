@@ -14,7 +14,7 @@
 #include <type_traits>
 #include <utility>
 
-#define DEBUG
+// #define DEBUG
 
 namespace mcl {
 
@@ -30,9 +30,9 @@ using control_t = UInt8; // 控制字节
 
 // inline 允许跨多翻译单元重复定义，适用于 header-only 常量
 inline constexpr control_t k_empty = static_cast<control_t>(-128); // 0x80 EMPTY
-inline constexpr control_t k_deleted = static_cast<control_t>(-2); // 0xFE DELETED
-inline constexpr SizeT k_min_capacity = 8;                         // 逻辑允许最大元素数量 = capacity * max load factor
-inline constexpr float k_default_max_load_factor = 0.875f;         // 7/8 减少 Group 全 FULL 的概率 (7%)
+// inline constexpr control_t k_deleted = static_cast<control_t>(-2); // 0xFE DELETED [[deprecated]]
+inline constexpr SizeT k_min_capacity = 8;                 // 逻辑允许最大元素数量 = capacity * max load factor
+inline constexpr float k_default_max_load_factor = 0.875f; // 7/8 减少 Group 全 FULL 的概率 (7%)
 // EMPTY 非常重要，特别是查找不存在的 key 的时候，越早遇到 key 就能越早返回 false，避免了对整张表完全查询
 
 // 数值是否为 2 的次幂
@@ -103,9 +103,10 @@ public:
     // control_t = uint8
     // k empty = 0x80
     // k deleted = 0xfe
+    // 还未定义哨兵值
     // k min capacity = 8
     // k default max load factor = .875
-    // 外部注意事项：为了让 next power of two 0 分支，不要给它传入 <= 1 的值
+    // 外部注意事项：为了让 next power of two 零分支，不要给它传入 <= 1 的值
     using key_type = KeyType;
     using mapped_type = ValueType;
     using value_type = std::pair<KeyType, ValueType>; // it->first = new_key 是用户的锅，不是我的
@@ -118,6 +119,8 @@ public:
 private:
     struct Slot {
         value_type kv;
+        // TODO: 对于特定类型 key，存 hash 还没算 hash 快，可以针对一些类型单开类，算 hash 而非拿
+        SizeT hash; // 完整 hash，用于 robin hoold 算 probe distance
     };
 
 #ifdef DEBUG
@@ -126,7 +129,6 @@ private:
         size_type capacity;
         size_type deleted;
         SizeT rehash_count;
-        SizeT cleanup_rehash_count;
         SizeT double_rehash_count;
         SizeT max_probe_len;
         double avg_probe_len;
@@ -158,7 +160,7 @@ public:
         void skip_to_next_occupied() noexcept {
             while (index_ < map_->capacity_) {
                 control_t control_byte = map_->controls_[index_];
-                if (control_byte != detail::k_empty && control_byte != detail::k_deleted) break;
+                if (control_byte != detail::k_empty) break; // 不再判断 k deleted
                 ++index_;
             }
         }
@@ -206,7 +208,7 @@ public:
         void skip_to_next_occupied() noexcept {
             while (index_ < map_->capacity_) {
                 control_t control_byte = map_->controls_[index_];
-                if (control_byte != detail::k_empty && control_byte != detail::k_deleted) break;
+                if (control_byte != detail::k_empty) break;
                 ++index_;
             }
         }
@@ -278,7 +280,7 @@ public:
         rehash(other.capacity_);
         for (size_type index = 0; index < other.capacity_; ++index) {
             control_t control_byte = other.controls_[index];
-            if (control_byte == detail::k_empty || control_byte == detail::k_deleted) continue;
+            if (control_byte == detail::k_empty) continue;
             const value_type &kv = other.slots_[index].kv;
             insert(kv);
         }
@@ -300,7 +302,7 @@ public:
         rehash(other.capacity_);
         for (size_type index = 0; index < other.capacity_; ++index) {
             control_t control_byte = other.controls_[index];
-            if (control_byte == detail::k_empty || control_byte == detail::k_deleted) continue;
+            if (control_byte == detail::k_empty) continue;
             const value_type &kv = other.slots_[index].kv;
             insert(kv);
         }
@@ -311,26 +313,22 @@ public:
     flat_hash_map(flat_hash_map &&other) noexcept
         : hasher_(std::move(other.hasher_)), equal_(std::move(other.equal_)), alloc_(std::move(other.alloc_)),
           slot_alloc_(std::move(other.slot_alloc_)), controls_(other.controls_), slots_(other.slots_),
-          capacity_(other.capacity_), size_(other.size_), deleted_(other.deleted_),
-          max_load_factor_(other.max_load_factor_)
+          capacity_(other.capacity_), size_(other.size_), max_load_factor_(other.max_load_factor_)
 #ifdef DEBUG
           ,
           total_probes_(other.total_probes_), probe_ops_(other.probe_ops_), max_probe_len_(other.max_probe_len_),
-          rehash_count_(other.rehash_count_), cleanup_rehash_count_(other.cleanup_rehash_count_),
-          double_rehash_count_(other.double_rehash_count_)
+          rehash_count_(other.rehash_count_), double_rehash_count_(other.double_rehash_count_)
 #endif
     {
         other.controls_ = nullptr;
         other.slots_ = nullptr;
         other.capacity_ = 0;
         other.size_ = 0;
-        other.deleted_ = 0;
 #ifdef DEBUG
         other.total_probes_ = 0;
         other.probe_ops_ = 0;
         other.max_probe_len_ = 0;
         other.rehash_count_ = 0;
-        other.cleanup_rehash_count_ = 0;
         other.double_rehash_count_ = 0;
 #endif
     }
@@ -353,14 +351,12 @@ public:
         slots_ = other.slots_;
         capacity_ = other.capacity_;
         size_ = other.size_;
-        deleted_ = other.deleted_;
         max_load_factor_ = other.max_load_factor_;
 #ifdef DEBUG
         total_probes_ = other.total_probes_;
         probe_ops_ = other.probe_ops_;
         max_probe_len_ = other.max_probe_len_;
         rehash_count_ = other.rehash_count_;
-        cleanup_rehash_count_ = other.cleanup_rehash_count_;
         double_rehash_count_ = other.double_rehash_count_;
 #endif
 
@@ -368,13 +364,11 @@ public:
         other.slots_ = nullptr;
         other.capacity_ = 0;
         other.size_ = 0;
-        other.deleted_ = 0;
 #ifdef DEBUG
         other.total_probes_ = 0;
         other.probe_ops_ = 0;
         other.max_probe_len_ = 0;
         other.rehash_count_ = 0;
-        other.cleanup_rehash_count_ = 0;
         other.double_rehash_count_ = 0;
 #endif
         return *this;
@@ -388,7 +382,6 @@ public:
     allocator_type get_allocator() const noexcept { return alloc_; }
     bool empty() const noexcept { return size_ == 0; }
     size_type size() const noexcept { return size_; }
-    size_type deleted() const noexcept { return deleted_; }
     size_type capacity() const noexcept { return capacity_; }
     float load_factor() const noexcept {
         if (capacity_ == 0) return 0.0f;
@@ -411,7 +404,6 @@ public:
         if (controls_)
             for (size_type index = 0; index < capacity_; ++index) controls_[index] = detail::k_empty;
         size_ = 0;
-        deleted_ = 0;
     }
 
     // 预留空间
@@ -433,7 +425,6 @@ public:
             controls_ = nullptr;
             slots_ = nullptr;
             capacity_ = 0;
-            deleted_ = 0;
             return;
         }
         // 有活跃元素
@@ -441,14 +432,12 @@ public:
         if (new_capacity <= detail::k_min_capacity) new_capacity = detail::k_min_capacity;
         else new_capacity = detail::next_power_of_two(new_capacity);
 
-        // 如果新旧容量一致且没有墓碑，什么也不做
-        if (new_capacity == capacity_ && deleted_ == 0) return;
+        if (new_capacity == capacity_) return;
 
         auto old_controls = controls_;
         auto old_slots = slots_;
         auto old_capacity = capacity_;
         allocate_storage(new_capacity); // 里面重置上面三者，所以需要提前保存
-        deleted_ = 0;                   // rehash 之后不会有任何墓碑
         move_old_elements(old_controls, old_slots, old_capacity);
     }
 
@@ -470,14 +459,12 @@ public:
         swap(slots_, other.slots_);
         swap(capacity_, other.capacity_);
         swap(size_, other.size_);
-        swap(deleted_, other.deleted_);
         swap(max_load_factor_, other.max_load_factor_);
 #ifdef DEBUG
         swap(total_probes_, other.total_probes_);
         swap(probe_ops_, other.probe_ops_);
         swap(max_probe_len_, other.max_probe_len_);
         swap(rehash_count_, other.rehash_count_);
-        swap(cleanup_rehash_count_, other.cleanup_rehash_count_);
         swap(double_rehash_count_, other.double_rehash_count_);
 #endif
     }
@@ -501,7 +488,6 @@ public:
         // 原本有 storage 但无活跃元素
         if (size_ == 0) {
             deallocate_storage();
-            deleted_ = 0;
             if (new_capacity == 0) { // 无活跃元素且 rehash(0) -> 空 map
                 controls_ = nullptr;
                 slots_ = nullptr;
@@ -533,13 +519,12 @@ public:
         // 第二种可能：new capacity = 2^n > capacity
 
         // 优化：如果新旧容量一致且没有墓碑，什么也不做
-        if (new_capacity == capacity_ && deleted_ == 0) return;
+        if (new_capacity == capacity_) return;
 
         auto old_controls = controls_;
         auto old_slots = slots_;
         auto old_capacity = capacity_;
         allocate_storage(new_capacity); // 里面重置上面三者，所以需要提前保存
-        deleted_ = 0;                   // rehash 之后不会有任何墓碑
 #ifdef DEBUG
         ++rehash_count_;
 #endif
@@ -570,7 +555,7 @@ public:
         if (!controls_ || size_ == 0) return end();
         SizeT hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
-        size_type index = find_index(key, hash_result, short_hash_result);
+        size_type index = find(key, hash_result, short_hash_result);
         if (index == npos) return end();
         return iterator(this, index);
     }
@@ -580,7 +565,7 @@ public:
         if (!controls_ || size_ == 0) return cend();
         SizeT hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
-        size_type index = find_index(key, hash_result, short_hash_result);
+        size_type index = find(key, hash_result, short_hash_result);
         if (index == npos) return cend();
         return const_iterator(this, index);
     }
@@ -603,22 +588,27 @@ public:
     mapped_type &operator[](const key_type &key) {
         SizeT hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
-        auto [index, found] = find_or_prepare_insert(key, hash_result, short_hash_result);
-        if (found) return slots_[index].kv.second;
-        emplace_at_index(index, short_hash_result, key, mapped_type{});
+        // 注意，这里又用回了 find，可能又探测多次
+        size_type index = find(key, hash_result, short_hash_result);
+        if (index != npos) return slots_[index].kv.second;
+
+        value_type kv{key, mapped_type{}};
+        size_type insert_index = robin_hood_insert(hash_result, short_hash_result, std::move(kv));
         ++size_;
-        return slots_[index].kv.second; // 可直接作为等号左侧内容赋值
+        return slots_[insert_index].kv.second; // 返回引用，所以不能是 mapped_type{}
     }
 
     // 右值版本，不是万能引用
     mapped_type &operator[](key_type &&key) {
         SizeT hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
-        auto [index, found] = find_or_prepare_insert(key, hash_result, short_hash_result);
-        if (found) return slots_[index].kv.second;
-        emplace_at_index(index, short_hash_result, std::move(key), mapped_type{});
+        size_type index = find(key, hash_result, short_hash_result);
+        if (index != npos) return slots_[index].kv.second;
+
+        value_type kv{std::move(key), mapped_type{}};
+        size_type insert_index = robin_hood_insert(hash_result, short_hash_result, std::move(kv));
         ++size_;
-        return slots_[index].kv.second;
+        return slots_[insert_index].kv.second;
     }
 
     // 尝试插入给定的键值对，返回指向键值对的迭代器以及是否为新的键值对
@@ -628,11 +618,8 @@ public:
     std::pair<iterator, bool> insert(value_type &&kv) {
         SizeT hash_result = hash_key(kv.first);
         control_t short_hash_result = detail::short_hash(hash_result);
-        auto [index, found] = find_or_prepare_insert(kv.first, hash_result, short_hash_result);
-        if (found) return {iterator(this, index), false};
-        emplace_at_index(index, short_hash_result, std::move(kv.first), std::move(kv.second));
-        ++size_;
-        return {iterator(this, index), true};
+        auto [index, inserted] = find_or_insert_with_kv(hash_result, short_hash_result, std::move(kv));
+        return {iterator(this, index), inserted};
     }
 
     // 插入新的键值对或者覆盖已有键的值，返回真代表插入，返回假代表覆盖
@@ -641,14 +628,15 @@ public:
     std::pair<iterator, bool> insert_or_assign(const key_type &key, M &&mapped) {
         SizeT hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
-        auto [index, found] = find_or_prepare_insert(key, hash_result, short_hash_result);
-        if (found) {
+        size_type index = find(key, hash_result, short_hash_result);
+        if (index != npos) {
             slots_[index].kv.second = std::forward<M>(mapped);
             return {iterator(this, index), false}; // assign -> false
         }
-        emplace_at_index(index, short_hash_result, key, std::forward<M>(mapped));
+        value_type kv{key, std::forward<M>(mapped)};
+        size_type insert_index = robin_hood_insert(hash_result, short_hash_result, std::move(kv));
         ++size_;
-        return {iterator(this, index), true};
+        return {iterator(this, insert_index), true};
     }
 
     // 接收完整键和完整值，返回指向键值对的迭代器以及是否为新的键值对
@@ -657,11 +645,9 @@ public:
     std::pair<iterator, bool> emplace(K &&key, M &&mapped) {
         SizeT hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
-        auto [index, found] = find_or_prepare_insert(key, hash_result, short_hash_result);
-        if (found) return {iterator(this, index), false};
-        emplace_at_index(index, short_hash_result, std::forward<K>(key), std::forward<M>(mapped));
-        ++size_;
-        return {iterator(this, index), true};
+        value_type kv{std::forward<K>(key), std::forward<M>(mapped)};
+        auto [index, inserted] = find_or_insert_with_kv(hash_result, short_hash_result, std::move(kv));
+        return {iterator(this, index), inserted};
     }
 
     // 接收完整键和值的构造参数，返回指向键值对的迭代器以及是否为新的键值对，若键已存在，不覆盖
@@ -670,13 +656,13 @@ public:
     std::pair<iterator, bool> try_emplace(const key_type &key, Args &&...args) {
         SizeT hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
-        auto [index, found] = find_or_prepare_insert(key, hash_result, short_hash_result);
-        if (found) return {iterator(this, index), false}; // key 已经存在
-        std::construct_at(std::addressof(slots_[index].kv), std::piecewise_construct, std::forward_as_tuple(key),
-                          std::forward_as_tuple(std::forward<Args>(args)...));
-        controls_[index] = short_hash_result;
+        size_type index = find(key, hash_result, short_hash_result);
+        if (index != npos) return {iterator(this, index), false};
+
+        value_type kv{key, mapped_type(std::forward<Args>(args)...)};
+        size_type insert_index = robin_hood_insert(hash_result, short_hash_result, std::move(kv));
         ++size_;
-        return {iterator(this, index), true};
+        return {iterator(this, insert_index), true};
     }
 
     // 接收完整键和值的构造参数，返回指向键值对的迭代器以及是否为新的键值对，若键已存在，不覆盖（右值版本）
@@ -685,13 +671,13 @@ public:
     std::pair<iterator, bool> try_emplace(key_type &&key, Args &&...args) {
         SizeT hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
-        auto [index, found] = find_or_prepare_insert(key, hash_result, short_hash_result);
-        if (found) return {iterator(this, index), false};
-        std::construct_at(std::addressof(slots_[index].kv), std::piecewise_construct,
-                          std::forward_as_tuple(std::move(key)), std::forward_as_tuple(std::forward<Args>(args)...));
-        controls_[index] = short_hash_result;
+        size_type index = find(key, hash_result, short_hash_result);
+        if (index != npos) return {iterator(this, index), false};
+
+        value_type kv(std::move(key), mapped_type(std::forward<Args>(args)...));
+        size_type insert_index = robin_hood_insert(hash_result, short_hash_result, std::move(kv));
         ++size_;
-        return {iterator(this, index), true};
+        return {iterator(this, insert_index), true};
     }
 
     // 提供迭代器范围区间并插入键值对
@@ -709,51 +695,31 @@ public:
         if (!controls_ || size_ == 0) return 0;
         SizeT hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
-        size_type index = find_index(key, hash_result, short_hash_result);
+        size_type index = find(key, hash_result, short_hash_result);
         if (index == npos) return 0;
         erase_at_index(index);
         return 1;
     }
 
     // 移除迭代器指向的键值对并返回指向下一个键值对的迭代器
-    iterator erase(iterator pos) {
-        if (pos == end()) return end();
-        size_type index = pos.index_;
-        erase_at_index(index);
-        iterator it(this, index);
-        it.skip_to_next_occupied();
-        return it;
-    }
-
-    // 移除迭代器指向的键值对并返回指向下一个键值对的迭代器
     iterator erase(const_iterator pos) {
         if (pos == end()) return end();
         size_type index = pos.index_;
-        erase_at_index(index);
+        erase_at_index(index); // 这里不检查 kv 是否合法，但是用户本就不应 erase 一个迭代器多次
         iterator it(this, index);
         it.skip_to_next_occupied();
         return it;
     }
 
-    // 移除给定迭代器区间范围内的所有键值对
+    // 移除给定迭代器区间范围内的所有键值对，不检查是否来自当前 map，自行确保 begin() <= first <= last <= end()，否则 UB
     iterator erase(const_iterator first, const_iterator last) {
-        // 不检查是否来自当前 map，UB 是用户自己的锅
-        if (first == last) return iterator(this, first.index_);
-        size_type begin_index = first.index_;
-        size_type end_index = last.index_;
-        if (begin_index > capacity_) begin_index = capacity_;
-        if (end_index > capacity_) end_index = capacity_;
-
-        // begin index <= capacity_ vvv
-        for (size_type index = begin_index; index < end_index; ++index) {
-            control_t control_byte = controls_[index];
-            if (control_byte != detail::k_empty && control_byte != detail::k_deleted) erase_at_index(index);
+        if (first.index_ >= last.index_) return iterator(this, first.index_);
+        auto it = first;
+        while (it != last) {
+            erase_at_index(it.index_);
+            it.skip_to_next_occupied();
         }
-
-        if (end_index >= capacity_) return end();
-        iterator it(this, end_index);
-        it.skip_to_next_occupied();
-        return it;
+        return iterator(this, last.index_ > capacity_ ? capacity_ : last.index_);
     }
 
 #ifdef DEBUG
@@ -762,9 +728,7 @@ public:
         return debug_stats {
             size_,
             capacity_,
-            deleted_,
             rehash_count_,
-            cleanup_rehash_count_,
             double_rehash_count_,
             max_probe_len_,
             probe_ops_ == 0 ? 0.0 : static_cast<double>(total_probes_) / static_cast<double>(probe_ops_)};
@@ -784,19 +748,18 @@ private:
     Slot *slots_ = nullptr;
     size_type capacity_ = 0;
     size_type size_ = 0;
-    size_type deleted_ = 0;
+    // size_type deleted_ = 0;
     float max_load_factor_ = detail::k_default_max_load_factor;
 
     using control_allocator_type = std::allocator<control_t>; // 确定由 std::allocator 来，不用 traits 包装
     control_allocator_type control_alloc_{};
 
 #ifdef DEBUG
-    mutable SizeT total_probes_ = 0;         // 探测总长度
-    mutable SizeT probe_ops_ = 0;            // 探测次数
-    mutable SizeT max_probe_len_ = 0;        // 历史最大探测长度
-    mutable SizeT rehash_count_ = 0;         // rehash 次数
-    mutable SizeT cleanup_rehash_count_ = 0; // 墓碑清理次数
-    mutable SizeT double_rehash_count_ = 0;  // 扩容次数
+    mutable SizeT total_probes_ = 0;        // 探测总长度
+    mutable SizeT probe_ops_ = 0;           // 探测次数
+    mutable SizeT max_probe_len_ = 0;       // 历史最大探测长度
+    mutable SizeT rehash_count_ = 0;        // rehash 次数
+    mutable SizeT double_rehash_count_ = 0; // 扩容次数
 
     void record_probe(SizeT probe_len) const noexcept {
         total_probes_ += probe_len;
@@ -806,6 +769,67 @@ private:
 #endif
 
     SizeT hash_key(const key_type &key) const noexcept { return hasher_(key); }
+
+    // 接收右值 kv，若 key 已经存在，返回 kv 索引 + false，否则插入新 kv 返回 insert index + true，并更新 size_
+    std::pair<size_type, bool> find_or_insert_with_kv(SizeT hash_result, control_t short_hash_result, value_type &&kv) {
+        if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
+        if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) double_storage();
+
+        size_type mask = capacity_ - 1;
+        size_type index = static_cast<size_type>(hash_result) & mask;
+        size_type dist = 0;
+        value_type cur_kv = std::move(kv);
+        SizeT cur_hash = hash_result;
+        control_t cur_ctrl = short_hash_result;
+#ifdef DEBUG
+        SizeT probe_len = 0;
+#endif
+        for (;;) {
+#ifdef DEBUG
+            ++probe_len;
+#endif
+            control_t control_byte = controls_[index];
+            if (control_byte == detail::k_empty) {
+                std::construct_at(std::addressof(slots_[index].kv), std::move(cur_kv));
+                slots_[index].hash = cur_hash;
+                controls_[index] = cur_ctrl;
+                ++size_;
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return {index, true}; // inserted = true
+            }
+
+            if (control_byte == short_hash_result) {
+                const key_type &stored_key = slots_[index].kv.first;
+                if (equal_(stored_key, cur_kv.first)) {
+#ifdef DEBUG
+                    record_probe(probe_len);
+#endif
+                    return {index, false}; // inserted = false
+                }
+                SizeT existing_hash = slots_[index].hash;
+                size_type existing_home = static_cast<size_type>(existing_hash) & mask;
+                size_type existing_dist = (index + capacity_ - existing_home) & mask;
+                if (existing_dist < dist) {
+                    value_type tmp_kv = std::move(slots_[index].kv);
+                    SizeT tmp_hash = slots_[index].hash;
+                    control_t tmp_ctrl = control_byte;
+
+                    slots_[index].kv = std::move(cur_kv);
+                    slots_[index].hash = cur_hash;
+                    controls_[index] = cur_ctrl;
+
+                    cur_kv = std::move(tmp_kv);
+                    cur_hash = tmp_hash;
+                    cur_ctrl = tmp_ctrl;
+                    dist = existing_dist;
+                }
+                index = (index + 1) & mask;
+                ++dist;
+            }
+        }
+    }
 
     // 仅开空间，更新 capacity_，新地方全设为 empty
     void allocate_storage(size_type capacity) {
@@ -826,8 +850,8 @@ private:
     void destroy_all() noexcept {
         for (size_type index = 0; index < capacity_; ++index) {
             control_t control_byte = controls_[index];
-            if (control_byte == detail::k_empty || control_byte == detail::k_deleted) continue;
-            std::destroy_at(std::addressof(slots_[index].kv)); // 不会标记为 deleted
+            if (control_byte == detail::k_empty) continue;
+            std::destroy_at(std::addressof(slots_[index].kv));
         }
     }
 
@@ -835,49 +859,27 @@ private:
     void move_old_elements(control_t *old_controls, Slot *old_slots, size_type old_capacity) {
         for (size_type index = 0; index < old_capacity; ++index) {
             control_t control_byte = old_controls[index];
-            if (control_byte == detail::k_empty || control_byte == detail::k_deleted) continue;
+            if (control_byte == detail::k_empty) continue;
             value_type &kv = old_slots[index].kv;
-            size_type hash_result = hash_key(kv.first);
-            control_t short_hash_result = detail::short_hash(hash_result);
+            // SizeT hash_result = hash_key(kv.first); // 注意，需要测试究竟是再算一次更快，还是取 Slot 中值更快
+            SizeT hash_result = old_slots[index].hash;
+            // active slot 下，short hash result = control byte
             size_type insert_index = find_insert_index_for_rehash(hash_result);
-            emplace_at_index(insert_index, short_hash_result, std::move(kv.first), std::move(kv.second));
+            emplace_at_index(insert_index, hash_result, control_byte, std::move(kv.first), std::move(kv.second));
             std::destroy_at(std::addressof(kv)); // 调用析构函数
         }
         control_alloc_.deallocate(old_controls, old_capacity);
         slot_alloc_traits::deallocate(slot_alloc_, old_slots, old_capacity);
     }
 
-    // 专门为 find_or_prepare_insert 准备的快 rehash 路径，由 deleted > size_ * alpha 触发
-    // 确保 capacity >= default min capacity
-    void cleanup_rehash() {
-        deleted_ = 0; // 清理后一定没有墓碑
-#ifdef DEBUG
-        ++cleanup_rehash_count_;
-        ++rehash_count_;
-#endif
-        // 原本有 storage 但没有活跃元素
-        if (size_ == 0) {
-            deallocate_storage();
-            allocate_storage(capacity_);
-            return;
-        }
-        // 原本有 storage 也有活跃元素
-        auto old_controls = controls_;
-        auto old_slots = slots_;
-        auto old_capacity = capacity_;
-        allocate_storage(capacity_); // 里面重置上面三者，所以需要提前保存
-        move_old_elements(old_controls, old_slots, old_capacity);
-    }
-
     // 专门为 find_or_prepare_insert 准备的快 rehash 路径，确保 capacity >= default min capacity
-    // 因为 used 过多而触发，此处 size 不可能为 0，否则 deleted > size_ * alpha 必然成立，会走上面 cleanup_rehash
+    // 因为 used 过多而触发，所以此处 size 不可能为 0
     // new_capacity = capacity * 2
     void double_storage() {
         auto old_controls = controls_;
         auto old_slots = slots_;
         auto old_capacity = capacity_;
         allocate_storage(capacity_ * 2);
-        deleted_ = 0; // 清理后一定没有墓碑
 #ifdef DEBUG
         ++double_rehash_count_;
         ++rehash_count_;
@@ -885,15 +887,18 @@ private:
         move_old_elements(old_controls, old_slots, old_capacity);
     }
 
-    // 返回 key 的 index
-    size_type find_index(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
+    // 提供哈希值和控制字节，返回 key 的 index
+    size_type find(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
+        // 除了仅找 key 是否存在的环节别用，节省性能
         if (capacity_ == 0) return npos;
         size_type mask = capacity_ - 1;
-        size_type index = static_cast<size_type>(hash_result) & mask; // 探测起点
+        size_type home = static_cast<size_type>(hash_result) & mask; // 探测起点
+        size_type index = home;
+        size_type dist = 0; // 当前查找 key 相对自己 home 的探测距离
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
-        for (size_type probe = 0; probe < capacity_; ++probe) { // 最多探测 capacity 步
+        for (;;) { // 最多探测 capacity 步
 #ifdef DEBUG
             ++probe_len;
 #endif
@@ -904,7 +909,15 @@ private:
 #endif
                 return npos; // EMPTY = 没找到
             }
-            // DELETED 会继续找
+            SizeT existing_hash = slots_[index].hash;
+            size_type existing_home = static_cast<size_type>(existing_hash) & mask;
+            size_type existing_dist = (index + capacity_ - existing_home) & mask;
+            if (existing_dist < dist) {
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return npos;
+            }
             if (control_byte == short_hash_result) {
                 const key_type &stored_key = slots_[index].kv.first;
                 if (equal_(stored_key, key)) {
@@ -915,6 +928,11 @@ private:
                 }
             }
             index = (index + 1) & mask; // 避免模运算，自动回滚到起点
+            ++dist;
+#ifdef DEBUG
+            // 不可能到达这里
+            if (dist > capacity_) throw std::logic_error("bad map");
+#endif
         }
 #ifdef DEBUG
         record_probe(probe_len);
@@ -923,6 +941,8 @@ private:
     }
 
     // rehash 搬迁元素专用，allocate_storage 更新 capacity_ 后使用，确保 capacity_ > 0 再调用
+    // 不会破坏 robin hood probing 探测链，由于不再有墓碑，每个 cluster 都是多个 FULL 紧挨在一起
+    // 具体来讲，线性搬迁确保每个元素都在它 home 的右手边，也不会让多个 cluster 混一起，因此安全
     size_type find_insert_index_for_rehash(SizeT hash_result) {
         // 暂时不需要 short hash result，别乱传
         size_type mask = capacity_ - 1;
@@ -935,7 +955,7 @@ private:
             ++probe_len;
 #endif
             control_t control_byte = controls_[index];
-            if (control_byte == detail::k_empty) { // 新地方没墓碑
+            if (control_byte == detail::k_empty) {
 #ifdef DEBUG
                 record_probe(probe_len);
 #endif
@@ -946,84 +966,95 @@ private:
         throw std::logic_error("flat_hash_map::rehash: no empty slot found");
     }
 
-    // 给定 key，存在则返回其 index，否则返回可插入位置，提前更新成员，所以别找到空位不插
-    template <typename K>
-        requires std::constructible_from<key_type, K>
-    [[nodiscard]] std::pair<size_type, bool> find_or_prepare_insert(const K &key, SizeT hash_result,
-                                                                    control_t short_hash_result) {
-        if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
+    // robin hood probing 插入，不做重复 key 检查，返回最终可插入位置，不更新 size_
+    size_type robin_hood_insert(SizeT hash_result, control_t short_hash_result, value_type &&kv) {
+        if (capacity_ == 0) allocate_storage(detail::k_min_capacity); // 第一次 insert，延迟分配
+        // 过载扩容
+        if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) double_storage();
+
         size_type mask = capacity_ - 1;
         size_type index = static_cast<size_type>(hash_result) & mask;
-        size_type first_deleted = npos;
+        size_type dist = 0;                     // robin hood
+        value_type cur_kv = std::move(kv);      // 当前找家的键值对
+        SizeT cur_hash = hash_result;           // 当前找家的键值对的哈希值
+        control_t cur_ctrl = short_hash_result; // 当前赵家的键值对的控制字节
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
-        for (size_type probe = 0; probe < capacity_; ++probe) {
+        for (;;) { // 死循环
 #ifdef DEBUG
             ++probe_len;
 #endif
             control_t control_byte = controls_[index];
-            if (control_byte == detail::k_empty) { // key 不存在，需用新位置
-                // 遇到过 DELETED，重用墓碑，不 rehash
-                if (first_deleted != npos) {
-#ifdef DEBUG
-                    record_probe(probe_len);
-#endif
-                    --deleted_; // 提前更新
-                    return {first_deleted, false};
-                }
-                // 无墓碑，占用 EMPTY，若墓碑太多，以当前容量重哈希，否则扩容一倍
-                size_type used = size_ + deleted_; // 已占用 = size + 墓碑
-                // + 1 给新的还未被插入的元素做准备
-                if (static_cast<float>(used + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
-                    // TODO: deleted > size * alpha
-                    // 清理墓碑放里面
-
-#ifdef DEBUG
-                    record_probe(probe_len);
-#endif
-                    if (deleted_ > size_ && size_ > 0) cleanup_rehash();
-                    else double_storage();
-                    return find_or_prepare_insert(key, hash_result, short_hash_result); // 表的结构已经改变，再走一遍
-                }
+            if (control_byte == detail::k_empty) {
+                // 找到空位，直接放
+                std::construct_at(std::addressof(slots_[index].kv), std::move(cur_kv));
+                slots_[index].hash = cur_hash;
+                controls_[index] = cur_ctrl;
 #ifdef DEBUG
                 record_probe(probe_len);
 #endif
-                return {index, false};
+                return index;
             }
-            if (control_byte == detail::k_deleted) {
-                if (first_deleted == npos) first_deleted = index;
-            } else if (control_byte == short_hash_result) {
-                const key_type &stored_key = slots_[index].kv.first;
-                if (equal_(stored_key, key)) {
-#ifdef DEBUG
-                    record_probe(probe_len);
-#endif
-                    return {index, true};
-                }
+            // robin hood：如果当前槽位元素离家更近，抢夺
+            SizeT existing_hash = slots_[index].hash;
+            size_type existing_home = static_cast<size_type>(existing_hash) & mask; // home 位置
+            size_type existing_dist = (index + capacity_ - existing_home) & mask;
+            if (existing_dist < dist) { // 抢 home
+                // 备份被踢出去的富裕 kv
+                value_type tmp_kv = std::move(slots_[index].kv);
+                SizeT tmp_hash = slots_[index].hash;
+                control_t tmp_ctrl = control_byte; // controls_[index]
+                // 把穷 kv 挪进来
+                slots_[index].kv = std::move(cur_kv);
+                slots_[index].hash = cur_hash;
+                controls_[index] = cur_ctrl;
+                // 更新当前处理的 kv
+                cur_kv = std::move(tmp_kv);
+                cur_hash = tmp_hash;
+                cur_ctrl = tmp_ctrl;
+                dist = existing_dist;
             }
             index = (index + 1) & mask;
+            ++dist;
         }
-        throw std::logic_error("no empty slot found"); // 不会到这里
     }
 
-    // 在指定位置上填充指纹并构造 kv，不更新 size_
+    // 在指定位置上填充哈希值，控制字节，并构造 kv，不更新 size_
     template <typename K, typename M>
         requires(std::constructible_from<key_type, K> && std::constructible_from<mapped_type, M>)
-    void emplace_at_index(size_type index, control_t short_hash_result, K &&key, M &&mapped) {
+    void emplace_at_index(size_type index, SizeT hash_result, control_t short_hash_result, K &&key, M &&mapped) {
         std::construct_at(std::addressof(slots_[index].kv),
                           std::piecewise_construct,                    // 分片构造
                           std::forward_as_tuple(std::forward<K>(key)), //
                           std::forward_as_tuple(std::forward<M>(mapped)));
+        slots_[index].hash = hash_result;
         controls_[index] = short_hash_result;
     }
 
     // 调用 index 处 kv 析构，标记为墓碑，更新 size_ 和 deleted_，无 rehash 行为
     void erase_at_index(size_type index) noexcept {
-        std::destroy_at(std::addressof(slots_[index].kv));
-        controls_[index] = detail::k_deleted;
+        // 逻辑：删完后当前 cluster 剩余元素左移一格，遇到 empty 或者新 cluster 停止
+        size_type mask = capacity_ - 1;
+        size_type cur = index;
+
+        for (;;) {
+            size_type next = (cur + 1) & mask;
+            control_t control_byte = controls_[next];
+            if (control_byte == detail::k_empty) break;
+            SizeT next_hash = slots_[next].hash;
+            size_type home = static_cast<size_type>(next_hash) & mask;
+            size_type dist_from_home = (next + capacity_ - home) & mask;
+            // dist from home = 0 说明是 next cluster，不能左移破坏 probing 链
+            if (dist_from_home == 0) break; // index 为 next 的 kv 刚好在自己家里
+            controls_[cur] = control_byte;
+            slots_[cur].kv = std::move(slots_[next].kv);
+            slots_[cur].hash = next_hash;
+            cur = next;
+        }
+        std::destroy_at(std::addressof(slots_[cur].kv));
+        controls_[cur] = detail::k_empty;
         --size_;
-        ++deleted_;
     }
 
     friend bool operator==(const flat_hash_map &lhs, const flat_hash_map &rhs) {
@@ -1033,8 +1064,7 @@ private:
 
         for (size_type index = 0; index < lhs.capacity_; ++index) {
             control_t control_byte = lhs.controls_[index];
-            if (control_byte == detail::k_empty || control_byte == detail::k_deleted) continue;
-
+            if (control_byte == detail::k_empty) continue;
             const value_type &kv = lhs.slots_[index].kv;
             auto it = rhs.find(kv.first);
             if (it == rhs.end()) return false;            // 对面没有这个键

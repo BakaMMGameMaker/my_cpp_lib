@@ -59,7 +59,6 @@ static void test_basic_operations() {
     assert(m.empty()); // 初始建表为空
     assert(m.size() == 0);
     assert(m.capacity() == 0); // 延迟分配
-    assert(m.deleted() == 0);
 
     // insert / find
     auto [it1, inserted1] = m.emplace(1u, 10u);
@@ -83,13 +82,11 @@ static void test_basic_operations() {
     assert(m.size() == 2);
     assert(m.at(2u) == 200u);
     assert(m.capacity() == 8);
-    assert(m.deleted() == 0);
 
     m[2u] = 300u;
     assert(m.size() == 2);
     assert(m.at(2u) == 300u);
     assert(m.capacity() == 8);
-    assert(m.deleted() == 0);
 
     UInt32 &ref3 = m[3u];
     assert(ref3 == 0u); // mapped_type{}
@@ -97,7 +94,6 @@ static void test_basic_operations() {
     assert(m.at(3u) == 300u);
     assert(m.size() == 3);
     assert(m.capacity() == 8);
-    assert(m.deleted() == 0);
 
     // insert or assign
     auto [it3, inserted3] = m.insert_or_assign(2u, 222u);
@@ -110,7 +106,6 @@ static void test_basic_operations() {
     assert(m.at(4u) == 444u);
     assert(m.size() == 4);
     assert(m.capacity() == 8);
-    assert(m.deleted() == 0);
 
     // at 异常
     bool threw = false;
@@ -120,7 +115,6 @@ static void test_basic_operations() {
     assert(threw);
     assert(m.size() == 4);
     assert(m.capacity() == 8);
-    assert(m.deleted() == 0);
 
     // erase by key
     SizeT erased = m.erase(2u);
@@ -128,28 +122,24 @@ static void test_basic_operations() {
     assert(!m.contains(2u));
     assert(m.size() == 3);
     assert(m.capacity() == 8);
-    assert(m.deleted() == 1);
 
     // clear / 再插入
     m.clear();
     assert(m.empty());
     assert(m.size() == 0);
     assert(m.capacity() == 8);
-    assert(m.deleted() == 0);
 
     auto [it5, inserted5] = m.emplace(42u, 4242u);
     assert(inserted5);
     assert(m.size() == 1);
     assert(m.at(42u) == 4242u);
     assert(m.capacity() == 8);
-    assert(m.deleted() == 0);
 
     m.clear();
     assert(m.size() == 0);
     m.rehash(0);
     assert(m.size() == 0);
     assert(m.capacity() == 0);
-    assert(m.deleted() == 0);
 
     // try_emplace
     auto [te_it1, te_inserted1] = m.try_emplace(5u, 555u);
@@ -199,7 +189,6 @@ static void test_shrink_to_fit() {
     m.shrink_to_fit();
     assert(m.size() == 0);
     assert(m.capacity() == 0);
-    assert(m.deleted() == 0);
 
     map_t m2;
     m2.max_load_factor(0.5f);
@@ -209,11 +198,9 @@ static void test_shrink_to_fit() {
     for (UInt32 i = 0; i < 10; ++i) m2.emplace(i, i * 10u);
     for (UInt32 i = 0; i < 3; ++i) assert(m2.erase(i) == 1);
     assert(m2.size() == 7);
-    assert(m2.deleted() == 3);
 
     m2.shrink_to_fit();
     assert(m2.size() == 7);
-    assert(m2.deleted() == 0);
     assert(m2.capacity() == 16);
 
     for (UInt32 i = 0; i < 10; ++i) {
@@ -237,7 +224,6 @@ static void test_high_collision() {
     }
     assert(m.size() == N);
     assert(m.capacity() == 256);
-    assert(m.deleted() == 0);
 
     for (UInt32 i = 0; i < N; ++i) {
         auto it = m.find(i);
@@ -252,7 +238,6 @@ static void test_high_collision() {
     }
     assert(m.size() == N / 2);
     assert(m.capacity() == 256);
-    assert(m.deleted() == N / 2);
 
     for (UInt32 i = 0; i < N; ++i) {
         auto it = m.find(i);
@@ -300,14 +285,12 @@ static void test_insert_erase_insert_cycle() {
         assert(insert);
     }
     assert(m.size() == 10);
-    assert(m.deleted() == 0);
 
     for (UInt32 i = 0; i < 5; ++i) {
         SizeT erased = m.erase(i);
         assert(erased == 1);
     }
     assert(m.size() == 5);
-    assert(m.deleted() == 5);
     assert(m.capacity() == 32);
 
     for (UInt32 i = 100; i < 105; ++i) {
@@ -316,7 +299,6 @@ static void test_insert_erase_insert_cycle() {
     }
     assert(m.size() == 10);
     assert(m.capacity() == 32);
-    assert(m.deleted() <= 5);
 }
 
 static void test_iterators() {
@@ -338,7 +320,6 @@ static void test_iterators() {
         while (it != m2.end()) it = m2.erase(it);
         assert(m2.empty());
         assert(m2.size() == 0);
-        assert(m2.deleted() == 128);
     }
 
     // 区间 erase
@@ -362,7 +343,6 @@ static void test_iterators() {
         SizeT remaining = 0;
         for (auto it = m3.begin(); it != m3.end(); ++it) ++remaining;
         assert(remaining + removed_keys.size() == N);
-        assert(m3.deleted() == removed_keys.size());
     }
 }
 

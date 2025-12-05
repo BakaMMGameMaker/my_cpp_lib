@@ -53,6 +53,26 @@ add_executable(s_flat_hash_map_bench
     s_flat_hash_map/bench/s_flat_hash_map_bench.cpp
 )
 
+# =====================================================
+#                 Target 3: Small Benchmarks
+# =====================================================
+add_executable(s_flat_hash_map_bench_small
+    s_flat_hash_map/bench/s_flat_hash_map_bench_small.cpp
+)
+
+target_compile_definitions(s_flat_hash_map_bench_small PRIVATE BENCHMARK_STATIC_DEFINE)
+target_compile_options(s_flat_hash_map_bench_small PRIVATE
+    -Wno-used-but-marked-unused
+    -Wno-switch-default
+)
+
+target_link_libraries(s_flat_hash_map_bench_small PRIVATE
+    benchmark
+    benchmark_main
+    shlwapi
+)
+
+
 target_compile_definitions(s_flat_hash_map_bench PRIVATE BENCHMARK_STATIC_DEFINE)
 target_compile_options(s_flat_hash_map_bench PRIVATE
     -Wno-used-but-marked-unused

@@ -238,57 +238,6 @@ static void BM_FindHit(benchmark::State &state, KeyDistribution dist, float max_
     counters.publish(state, max_load_factor, label);
 }
 
-template <class Map, class Key>
-static void BM_FindMiss(benchmark::State &state, KeyDistribution dist, float max_load_factor) {
-    const std::size_t N = static_cast<std::size_t>(state.range(0));
-    const auto dataset = prepare_int_dataset<Key>(dist, N);
-    Map map;
-    apply_max_load_factor(map, max_load_factor);
-    fill_map_with_keys(map, dataset.keys);
-
-    DebugCounters counters;
-    const auto label = build_label(dist, max_load_factor);
-    for (auto _ : state) {
-        for (std::size_t i = 0; i < N; ++i) {
-            auto it = map.find(dataset.miss_keys[i]);
-            benchmark::DoNotOptimize(it);
-        }
-        state.PauseTiming();
-        counters.add(map);
-        state.ResumeTiming();
-    }
-
-    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(N));
-    counters.publish(state, max_load_factor, label);
-}
-
-template <class Map, class Key>
-static void BM_EraseHalfInsertHalf(benchmark::State &state, KeyDistribution dist, float max_load_factor) {
-    const std::size_t N = static_cast<std::size_t>(state.range(0));
-    const auto dataset = prepare_int_dataset<Key>(dist, N);
-    const std::size_t half = N / 2;
-
-    DebugCounters counters;
-    const auto label = build_label(dist, max_load_factor);
-    for (auto _ : state) {
-        state.PauseTiming();
-        Map map;
-        apply_max_load_factor(map, max_load_factor);
-        fill_map_with_keys(map, dataset.keys);
-        state.ResumeTiming();
-
-        for (std::size_t i = 0; i < half; ++i) { (void)map.erase(dataset.erase_order[i]); }
-        for (std::size_t i = 0; i < half; ++i) { map.emplace(dataset.new_keys[i], static_cast<std::uint32_t>(i)); }
-
-        state.PauseTiming();
-        counters.add(map);
-        state.ResumeTiming();
-    }
-
-    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(N));
-    counters.publish(state, max_load_factor, label);
-}
-
 // ------------- 短字符串 string_view 场景 -------------
 
 std::vector<std::string> make_short_strings(std::size_t N, std::uint64_t seed = 321987) {
@@ -422,57 +371,6 @@ template <class Map> static void BM_StringFindHit(benchmark::State &state, float
     counters.publish(state, max_load_factor, label);
 }
 
-template <class Map> static void BM_StringFindMiss(benchmark::State &state, float max_load_factor) {
-    const std::size_t N = static_cast<std::size_t>(state.range(0));
-    const auto dataset = prepare_string_dataset(N);
-    const auto map_keys = materialize_map_keys<Map>(dataset);
-    Map map;
-    apply_max_load_factor(map, max_load_factor);
-    fill_map_with_keys(map, map_keys.keys);
-
-    DebugCounters counters;
-    const auto label = build_string_label(max_load_factor);
-    for (auto _ : state) {
-        for (std::size_t i = 0; i < N; ++i) {
-            auto it = map.find(map_keys.miss_keys[i]);
-            benchmark::DoNotOptimize(it);
-        }
-        state.PauseTiming();
-        counters.add(map);
-        state.ResumeTiming();
-    }
-
-    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(N));
-    counters.publish(state, max_load_factor, label);
-}
-
-template <class Map> static void BM_StringEraseHalfInsertHalf(benchmark::State &state, float max_load_factor) {
-    const std::size_t N = static_cast<std::size_t>(state.range(0));
-    const auto dataset = prepare_string_dataset(N);
-    const auto map_keys = materialize_map_keys<Map>(dataset);
-    const std::size_t half = N / 2;
-
-    DebugCounters counters;
-    const auto label = build_string_label(max_load_factor);
-    for (auto _ : state) {
-        state.PauseTiming();
-        Map map;
-        apply_max_load_factor(map, max_load_factor);
-        fill_map_with_keys(map, map_keys.keys);
-        state.ResumeTiming();
-
-        for (std::size_t i = 0; i < half; ++i) { (void)map.erase(map_keys.keys[dataset.erase_order[i]]); }
-        for (std::size_t i = 0; i < half; ++i) { map.emplace(map_keys.new_keys[i], static_cast<std::uint32_t>(i)); }
-
-        state.PauseTiming();
-        counters.add(map);
-        state.ResumeTiming();
-    }
-
-    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(N));
-    counters.publish(state, max_load_factor, label);
-}
-
 // ---------------- 注册所有基准 ----------------
 
 using std_umap_u32 = std::unordered_map<std::uint32_t, std::uint32_t>;
@@ -513,34 +411,27 @@ template <class Map> void register_string_family(const std::string &prefix) {
             benchmark::RegisterBenchmark((prefix + "_insert_" + suffix).c_str(), [load_factor](benchmark::State &st) {
                 BM_StringInsert<Map>(st, load_factor);
             });
+
         auto *find_hit =
             benchmark::RegisterBenchmark((prefix + "_find_hit_" + suffix).c_str(), [load_factor](benchmark::State &st) {
                 BM_StringFindHit<Map>(st, load_factor);
             });
-        auto *find_miss = benchmark::RegisterBenchmark(
-            (prefix + "_find_miss_" + suffix).c_str(),
-            [load_factor](benchmark::State &st) { BM_StringFindMiss<Map>(st, load_factor); });
-        auto *erase_insert = benchmark::RegisterBenchmark(
-            (prefix + "_erase_half_insert_half_" + suffix).c_str(),
-            [load_factor](benchmark::State &st) { BM_StringEraseHalfInsertHalf<Map>(st, load_factor); });
 
         for (auto size : kSizes) {
-            insert->Arg(static_cast<std::int64_t>(size));
-            find_hit->Arg(static_cast<std::int64_t>(size));
-            find_miss->Arg(static_cast<std::int64_t>(size));
-            erase_insert->Arg(static_cast<std::int64_t>(size));
+            const auto arg = static_cast<std::int64_t>(size);
+            insert->Arg(arg);
+            find_hit->Arg(arg);
         }
     }
 }
 
 void register_all_benchmarks() {
+    // 整数：只测 u32 随机分布，std vs flat
     register_int_family<std_umap_u32, std::uint32_t>("std_umap_u32");
-    register_int_family<std_umap_u64, std::uint64_t>("std_umap_u64");
     register_int_family<flat_map_u32, std::uint32_t>("flat_map_u32");
-    register_int_family<flat_map_u64, std::uint64_t>("flat_map_u64");
 
+    // 短字符串：只测 std::string vs flat_map<std::string_view>
     register_string_family<std_umap_string>("std_umap_string");
-    register_string_family<std_umap_sview>("std_umap_sview");
     register_string_family<flat_map_sview>("flat_map_sview");
 }
 
