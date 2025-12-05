@@ -773,6 +773,7 @@ private:
         std::optional<value_type> cur_kv; // 真正需要时再 emplace
         SizeT cur_hash = 0;
         control_t cur_ctrl = 0;
+        bool need_check_duplicate = true; // 仍需要查找重复键
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
@@ -796,9 +797,8 @@ private:
 #endif
                 return index;
             }
-            if (control_byte == short_hash_result) {
-                const key_type &stored_key = slots_[index].kv.first;
-                if (equal_(stored_key, key)) {
+            if (control_byte == short_hash_result && need_check_duplicate) { // 大部分指纹不匹配，放前面
+                if (equal_(slots_[index].kv.first, key)) {
 #ifdef DEBUG
                     record_probe(probe_len);
 #endif
@@ -810,8 +810,9 @@ private:
             size_type existing_home = static_cast<size_type>(existing_hash) & mask;
             size_type existing_dist = (index + capacity_ - existing_home) & mask;
             if (existing_dist < dist) {
-                // 说明原本传入的 key 的确不存在，构造之
-                if (!cur_kv) {
+                // 进入这里，说明原始 key 不再表中，后续不必查重
+                need_check_duplicate = false;
+                if (!cur_kv) { // 原本传入的 key 的确不存在，构造 optional kv
                     cur_kv.emplace(key_type(std::forward<K>(key)), mapped_type{});
                     cur_hash = hash_result;
                     cur_ctrl = short_hash_result;
@@ -846,6 +847,7 @@ private:
         value_type cur_kv = std::move(kv);
         SizeT cur_hash = hash_result;
         control_t cur_ctrl = short_hash_result;
+        bool need_check_duplicate = true;
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
@@ -864,7 +866,7 @@ private:
 #endif
                 return {index, true}; // inserted = true
             }
-            if (control_byte == short_hash_result) { // 指纹匹配，同一 cluster
+            if (control_byte == short_hash_result && need_check_duplicate) { // 指纹匹配，同一 cluster
                 const key_type &stored_key = slots_[index].kv.first;
                 if (equal_(stored_key, cur_kv.first)) {
 #ifdef DEBUG
@@ -878,8 +880,8 @@ private:
             size_type existing_home = static_cast<size_type>(existing_hash) & mask;
             size_type existing_dist = (index + capacity_ - existing_home) & mask;
             if (existing_dist < dist) {
-                // 注意，第一次走到这里的时候，根据 robin hood probing 规律
-                // 原本传入的 key 已经可认定为不存在，所以直接劫富济贫是合理的
+                need_check_duplicate = false;
+
                 value_type tmp_kv = std::move(slots_[index].kv);
                 SizeT tmp_hash = slots_[index].hash;
                 control_t tmp_ctrl = control_byte;
