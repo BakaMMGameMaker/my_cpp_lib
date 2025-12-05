@@ -641,33 +641,14 @@ public:
     }
 
     // 接收完整键和值的构造参数，返回指向键值对的迭代器以及是否为新的键值对，若键已存在，不覆盖
-    template <typename... Args>
-        requires std::constructible_from<mapped_type, Args...>
-    std::pair<iterator, bool> try_emplace(const key_type &key, Args &&...args) {
+    template <typename K, typename... Args>
+        requires(std::same_as<std::remove_cvref_t<K>, key_type> && std::constructible_from<mapped_type, Args...>)
+    std::pair<iterator, bool> try_emplace(K &&key, Args &&...args) {
         SizeT hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
-        size_type index = find(key, hash_result, short_hash_result);
-        if (index != npos) return {iterator(this, index), false};
-
-        value_type kv{key, mapped_type(std::forward<Args>(args)...)};
-        size_type insert_index = robin_hood_insert(hash_result, short_hash_result, std::move(kv));
-        ++size_;
-        return {iterator(this, insert_index), true};
-    }
-
-    // 接收完整键和值的构造参数，返回指向键值对的迭代器以及是否为新的键值对，若键已存在，不覆盖（右值版本）
-    template <typename... Args>
-        requires std::constructible_from<mapped_type, Args...>
-    std::pair<iterator, bool> try_emplace(key_type &&key, Args &&...args) {
-        SizeT hash_result = hash_key(key);
-        control_t short_hash_result = detail::short_hash(hash_result);
-        size_type index = find(key, hash_result, short_hash_result);
-        if (index != npos) return {iterator(this, index), false};
-
-        value_type kv(std::move(key), mapped_type(std::forward<Args>(args)...));
-        size_type insert_index = robin_hood_insert(hash_result, short_hash_result, std::move(kv));
-        ++size_;
-        return {iterator(this, insert_index), true};
+        auto [index, inserted] =
+            find_or_try_emplace(hash_result, short_hash_result, std::forward<K>(key), std::forward<Args>(args)...);
+        return {iterator(this, index), inserted};
     }
 
     // 提供迭代器范围区间并插入键值对
@@ -760,8 +741,8 @@ private:
 
     SizeT hash_key(const key_type &key) const noexcept { return hasher_(key); }
 
-    // operator[] 专用 单词 probing insert，若 key 已经存在，直接返回 index，不构造 mapped_type{}
-    // 若 key 不存在，robin hood 规则插入 {key, mapped_type{}} 并更新 size_
+    // operator[] 专用单次 probing，若 key 已经存在，返回 index，不构造 mapped_type 对象
+    // 否则 robin hood 规则插入 {key, mapped_type{}} 并更新 size_
     template <typename K>
         requires(std::constructible_from<key_type, K>) // 开头已限制 mapped type 可默认构造
     size_type find_or_insert_default(K &&key, SizeT hash_result, control_t short_hash_result) {
@@ -833,7 +814,7 @@ private:
             index = (index + 1) & mask;
             ++dist;
         }
-        throw std::logic_error("logic error in find or insert default");
+        throw;
     }
 
     // 接收右值 kv，若 key 已经存在，返回 kv 索引 + false，否则插入新 kv 返回 insert index + true，并更新 size_
@@ -867,8 +848,7 @@ private:
                 return {index, true}; // inserted = true
             }
             if (control_byte == short_hash_result && need_check_duplicate) { // 指纹匹配，同一 cluster
-                const key_type &stored_key = slots_[index].kv.first;
-                if (equal_(stored_key, cur_kv.first)) {
+                if (equal_(slots_[index].kv.first, cur_kv.first)) {
 #ifdef DEBUG
                     record_probe(probe_len);
 #endif
@@ -898,7 +878,86 @@ private:
             index = (index + 1) & mask;
             ++dist;
         }
-        throw std::logic_error("logic error in find or insert kv");
+        throw;
+    }
+
+    // 专门为 try emplace 提供的快路径
+    // 接收键和 mapped_type 构造参数，单次 probing，若 key 已经存在，返回 key index, inserted = false
+    // 不构造 mapped_type 对象，否则按 robin hood 规则插入，并在真正需要时才构造 value_type 并更新 size_
+    template <typename K, typename... Args>
+        requires(std::constructible_from<key_type, K> && std::constructible_from<mapped_type, Args...>)
+    std::pair<size_type, bool> find_or_try_emplace(SizeT hash_result, control_t short_hash_result, K &&key,
+                                                   Args &&...args) {
+        if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
+        // TODO: 不一定真的要插入，小心无意义的 double storage
+        if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) double_storage();
+
+        size_type mask = capacity_ - 1;
+        size_type index = static_cast<size_type>(hash_result) & mask;
+        size_type dist = 0;
+
+        std::optional<value_type> cur_kv; // 延迟构造
+        SizeT cur_hash = 0;
+        control_t cur_ctrl = 0;
+        bool need_check_duplicate = true;
+#ifdef DEBUG
+        SizeT probe_len = 0;
+#endif
+        for (;;) {
+#ifdef DEBUG
+            ++probe_len;
+#endif
+            control_t control_byte = controls_[index];
+            if (control_byte == detail::k_empty) {
+                if (!cur_kv) {
+                    cur_kv.emplace(key_type(std::forward<K>(key)), mapped_type(std::forward<Args>(args)...));
+                    cur_hash = hash_result;
+                    cur_ctrl = short_hash_result;
+                }
+                std::construct_at(std::addressof(slots_[index].kv), std::move(*cur_kv));
+                slots_[index].hash = cur_hash;
+                controls_[index] = cur_ctrl;
+                ++size_;
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return {index, true}; // inserted = true
+            }
+            if (control_byte == short_hash_result && need_check_duplicate) {
+                if (equal_(slots_[index].kv.first, key)) {
+#ifdef DEBUG
+                    record_probe(probe_len);
+#endif
+                    return {index, false}; // inserted = false
+                }
+            }
+            SizeT existing_hash = slots_[index].hash;
+            size_type existing_home = static_cast<size_type>(existing_hash) & mask;
+            size_type existing_dist = (index + capacity_ - existing_home) & mask;
+            if (existing_dist < dist) {
+                need_check_duplicate = false;
+                if (!cur_kv) {
+                    cur_kv.emplace(key_type(std::forward<K>(key)), mapped_type(std::forward<Args>(args)...));
+                    cur_hash = hash_result;
+                    cur_ctrl = short_hash_result;
+                }
+                value_type tmp_kv = std::move(slots_[index].kv);
+                SizeT tmp_hash = slots_[index].hash;
+                control_t tmp_ctrl = control_byte;
+
+                slots_[index].kv = std::move(*cur_kv);
+                slots_[index].hash = cur_hash;
+                controls_[index] = cur_ctrl;
+
+                *cur_kv = std::move(tmp_kv);
+                cur_hash = tmp_hash;
+                cur_ctrl = tmp_ctrl;
+                dist = existing_dist;
+            }
+            index = (index + 1) & mask;
+            ++dist;
+        }
+        throw;
     }
 
     // 仅开空间，更新 capacity_，新地方全设为 empty
@@ -957,7 +1016,7 @@ private:
         move_old_elements(old_controls, old_slots, old_capacity);
     }
 
-    // 提供哈希值和控制字节，返回 key 的 index
+    // 提供哈希值和控制字节，返回 key 的 index，不存在则返回 npos
     size_type find(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
         // 除了仅找 key 是否存在的环节别用，节省性能
         if (capacity_ == 0) return npos;
@@ -989,8 +1048,7 @@ private:
                 return npos;
             }
             if (control_byte == short_hash_result) {
-                const key_type &stored_key = slots_[index].kv.first;
-                if (equal_(stored_key, key)) {
+                if (equal_(slots_[index].kv.first, key)) {
 #ifdef DEBUG
                     record_probe(probe_len);
 #endif

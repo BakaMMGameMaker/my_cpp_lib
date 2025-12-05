@@ -161,6 +161,23 @@ static void test_basic_operations() {
         assert(up == nullptr);
         assert(*mit->second == 99u);
     }
+
+    // 临界扩容行为
+    {
+        map_t m2;
+        m2.max_load_factor(0.5);
+        assert(m2.capacity() == 0);
+        m2.try_emplace(10u, 10u);
+        assert(m2.capacity() == 8);
+        assert(m2.size() == 1);
+        m2.try_emplace(20u, 10u);
+        m2.try_emplace(30u, 10u);
+        m2.try_emplace(40u, 10u);
+        assert(m2.size() == 4); // 根据 load factor，还不需要扩容
+        assert(m2.capacity() == 8);
+        m2.try_emplace(40u, 10u); // 插入重复键，不应该扩容
+        assert(m2.capacity() == 8);
+    }
 }
 
 static void test_insert_range_and_init_list() {
