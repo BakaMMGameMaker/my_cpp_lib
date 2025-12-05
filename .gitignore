@@ -1,14 +1,16 @@
 # 白名单
-!*CmakeLists.txt
+!*CMakeLists.txt
 !*/
 !README.md
 !.gitignore
 !*.cpp
 !*.hpp
 !*.h
-!tasks.json
 
-*
 # Ignore build outputs
 build/
 build/**
+.vscode/
+.cache/
+*.txt
+*.md
