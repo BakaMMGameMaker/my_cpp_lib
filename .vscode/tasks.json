@@ -13,7 +13,8 @@
                 "-G",
                 "Ninja",
                 "-DCMAKE_C_COMPILER=E:/LLVM/bin/clang.exe",
-                "-DCMAKE_CXX_COMPILER=E:/LLVM/bin/clang++.exe"
+                "-DCMAKE_CXX_COMPILER=E:/LLVM/bin/clang++.exe",
+                "-DCMAKE_BUILD_TYPE=Release"
             ],
             "group": "build"
         },

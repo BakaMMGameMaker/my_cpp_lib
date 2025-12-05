@@ -1,5 +1,10 @@
-// my_cpp_lib/s_flat_hash_map/tests/flat_hash_map_basic.cpp
-#include "s_flat_hash_map/s_flat_hash_map.hpp"
+// my_cpp_lib/s_flat_hash_map/tests/s_flat_hash_map_basic.cpp
+// Keep asserts enabled for this test binary even if the build passes -DNDEBUG.
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
+
+#include "s_flat_hash_map.hpp"
 #include "salias.h"
 #include <cassert>
 #include <iostream>

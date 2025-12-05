@@ -6,12 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# ----------------- 编译器选项 -----------------
+# ----------------- 全局编译器选项 -----------------
 add_compile_options(
     -Weverything
     -Werror
 
-    # 合法关闭：标准库会疯狂报
+    # 合法关闭：标准库会大量报警
     -Wno-c++98-compat
     -Wno-c++98-compat-pedantic
     -Wno-disabled-macro-expansion
@@ -39,12 +39,28 @@ link_directories(
     D:/allfolders/code/advanced/cpp/benchmark-main/build/src/Release
 )
 
-# ----------------- 测试与 benchmark 可执行文件 -----------------
-add_executable(flat_hash_map_basic
-    s_flat_hash_map/tests/flat_hash_map_basic.cpp
+# =====================================================
+#                     Target 1: Basic Tests
+# =====================================================
+add_executable(s_flat_hash_map_basic
+    s_flat_hash_map/tests/s_flat_hash_map_basic.cpp
 )
 
-target_link_libraries(flat_hash_map_basic PRIVATE
+# =====================================================
+#                     Target 2: Benchmarks
+# =====================================================
+add_executable(s_flat_hash_map_bench
+    s_flat_hash_map/bench/s_flat_hash_map_bench.cpp
+)
+
+target_compile_definitions(s_flat_hash_map_bench PRIVATE BENCHMARK_STATIC_DEFINE)
+target_compile_options(s_flat_hash_map_bench PRIVATE
+    -Wno-used-but-marked-unused
+    -Wno-switch-default
+)
+
+target_link_libraries(s_flat_hash_map_bench PRIVATE
     benchmark
     benchmark_main
+    shlwapi
 )

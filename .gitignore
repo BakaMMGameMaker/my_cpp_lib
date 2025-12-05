@@ -9,4 +9,4 @@
 !*.cpp
 !*.hpp
 !*.h
-!*.json
+!tasks.json
