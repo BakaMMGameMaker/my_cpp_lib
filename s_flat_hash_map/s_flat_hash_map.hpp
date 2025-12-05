@@ -377,6 +377,34 @@ public:
         rehash(min_capacity);
     }
 
+    // 缩减空间
+    void shrink_to_fit() {
+        if (size_ == 0) {               // 变为空 map
+            if (capacity_ == 0) return; // 本身就是空 map
+            deallocate_storage();       // 归还空间
+            // 重置成员
+            controls_ = nullptr;
+            slots_ = nullptr;
+            capacity_ = 0;
+            deleted_ = 0;
+            return;
+        }
+        // 有活跃元素
+        size_type new_capacity = static_cast<size_type>(std::ceil(static_cast<float>(size_) / max_load_factor_));
+        if (new_capacity <= detail::k_min_capacity) new_capacity = detail::k_min_capacity;
+        else new_capacity = detail::next_power_of_two(new_capacity);
+
+        // 如果新旧容量一致且没有墓碑，什么也不做
+        if (new_capacity == capacity_ && deleted_ == 0) return;
+
+        auto old_controls = controls_;
+        auto old_slots = slots_;
+        auto old_capacity = capacity_;
+        allocate_storage(new_capacity); // 里面重置上面三者，所以需要提前保存
+        deleted_ = 0;                   // rehash 之后不会有任何墓碑
+        move_old_elements(old_controls, old_slots, old_capacity);
+    }
+
     // 交换
     void
     swap(flat_hash_map &other) noexcept(std::allocator_traits<allocator_type>::propagate_on_container_swap::value ||

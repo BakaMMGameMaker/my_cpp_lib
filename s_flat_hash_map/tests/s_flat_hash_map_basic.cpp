@@ -190,6 +190,43 @@ static void test_insert_range_and_init_list() {
     assert(m.at(3u) == 30u);
 }
 
+static void test_shrink_to_fit() {
+    using map_t = mcl::flat_hash_map<UInt32, UInt32>;
+
+    map_t m;
+    m.emplace(1u, 1u);
+    assert(m.capacity() == 8);
+    m.clear();
+    m.shrink_to_fit();
+    assert(m.size() == 0);
+    assert(m.capacity() == 0);
+    assert(m.deleted() == 0);
+
+    map_t m2;
+    m2.max_load_factor(0.5f);
+    m2.reserve(64);
+    assert(m2.capacity() == 128);
+
+    for (UInt32 i = 0; i < 10; ++i) m2.emplace(i, i * 10u);
+    for (UInt32 i = 0; i < 3; ++i) assert(m2.erase(i) == 1);
+    assert(m2.size() == 7);
+    assert(m2.deleted() == 3);
+
+    m2.shrink_to_fit();
+    assert(m2.size() == 7);
+    assert(m2.deleted() == 0);
+    assert(m2.capacity() == 16);
+
+    for (UInt32 i = 0; i < 10; ++i) {
+        auto it = m2.find(i);
+        if (i < 3) assert(it == m2.end());
+        else {
+            assert(it != m2.end());
+            assert(it->second == i * 10u);
+        }
+    }
+}
+
 static void test_high_collision() {
     using map_t = mcl::flat_hash_map<UInt32, UInt32, bad_hash_u32>;
     map_t m;
@@ -365,6 +402,9 @@ int main() {
 
     test_insert_range_and_init_list();
     std::cout << "  insert range/init list OK\n";
+
+    test_shrink_to_fit();
+    std::cout << "  shrink_to_fit OK\n";
 
     test_high_collision();
     std::cout << "  high_collision OK\n";
