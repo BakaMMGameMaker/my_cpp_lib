@@ -339,8 +339,6 @@ public:
     }
 
     allocator_type get_allocator() const noexcept { return alloc_; }
-
-    // properties getter
     bool empty() const noexcept { return size_ == 0; }
     size_type size() const noexcept { return size_; }
     size_type deleted() const noexcept { return deleted_; }
@@ -351,7 +349,7 @@ public:
     }
     float max_load_factor() const noexcept { return max_load_factor_; }
 
-    // properties setter
+    // 设置新的 max load factor
     void max_load_factor(float load_factor) {
         // clamp
         if (load_factor < 0.50f) load_factor = 0.50f;
@@ -360,7 +358,7 @@ public:
         // 不主动 rehash
     }
 
-    // 不仅销毁全部 kv，还重置所有槽位为 empty
+    // 销毁全部 kv，重置所有槽位为 empty
     void clear() noexcept {
         if (size_ > 0) destroy_all();
         if (controls_)
@@ -431,7 +429,6 @@ public:
         }
 
         // capacity_ > 0 and size_ > 0，不允许缩容
-
         if (new_capacity <= capacity_) {
             new_capacity = capacity_;
         } else {
@@ -450,9 +447,7 @@ public:
         auto old_slots = slots_;
         auto old_capacity = capacity_;
         allocate_storage(new_capacity); // 里面重置上面三者，所以需要提前保存
-
-        deleted_ = 0; // rehash 之后不会有任何墓碑
-
+        deleted_ = 0;                   // rehash 之后不会有任何墓碑
         move_old_elements(old_controls, old_slots, old_capacity);
     }
 
@@ -463,9 +458,7 @@ public:
         return it;
     }
 
-    // const map.begin = cbegin
     const_iterator begin() const noexcept { return cbegin(); }
-
     const_iterator cbegin() const noexcept {
         if (!controls_ || size_ == 0) return const_iterator(this, capacity_);
         const_iterator it(this, 0);
@@ -477,6 +470,7 @@ public:
     const_iterator end() const noexcept { return cend(); } // const map.end = cend
     const_iterator cend() const noexcept { return const_iterator(this, capacity_); }
 
+    // 返回指向给定键值对的迭代器
     iterator find(const key_type &key) noexcept {
         if (!controls_ || size_ == 0) return end();
         SizeT hash_result = hash_key(key);
@@ -486,6 +480,7 @@ public:
         return iterator(this, index);
     }
 
+    // 返回指向给定键值对的迭代器
     const_iterator find(const key_type &key) const noexcept {
         if (!controls_ || size_ == 0) return cend();
         SizeT hash_result = hash_key(key);
@@ -509,12 +504,13 @@ public:
         return it->second;
     }
 
-    // 让 operator[] 行为一致，不存在的 key 自动 emplace 一个默认值
+    // 不存在的 key 自动 emplace 一个默认值
     mapped_type &operator[](const key_type &key) {
         SizeT hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
         auto [index, found] = find_or_prepare_insert(key, hash_result, short_hash_result);
-        if (!found) emplace_at_index(index, short_hash_result, key, mapped_type{});
+        if (found) return slots_[index].kv.second;
+        emplace_at_index(index, short_hash_result, key, mapped_type{});
         ++size_;
         return slots_[index].kv.second; // 可直接作为等号左侧内容赋值
     }
@@ -524,29 +520,29 @@ public:
         SizeT hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
         auto [index, found] = find_or_prepare_insert(key, hash_result, short_hash_result);
-        if (!found) emplace_at_index(index, short_hash_result, std::move(key), mapped_type{});
+        if (found) return slots_[index].kv.second;
+        emplace_at_index(index, short_hash_result, std::move(key), mapped_type{});
         ++size_;
         return slots_[index].kv.second;
     }
 
-    // 注意 value type 是 pair，不是 ValueType
-    std::pair<iterator, bool> insert(const value_type &value) { return emplace(value.first, value.second); }
+    // 尝试插入给定的键值对，返回指向键值对的迭代器以及是否为新的键值对
+    std::pair<iterator, bool> insert(const value_type &kv) { return emplace(kv.first, kv.second); }
 
-    // 右值版本
-    std::pair<iterator, bool> insert(value_type &&value) {
-        SizeT hash_result = hash_key(value.first);
+    // 尝试插入给定的键值对，返回指向键值对的迭代器以及是否为新的键值对（右值版本）
+    std::pair<iterator, bool> insert(value_type &&kv) {
+        SizeT hash_result = hash_key(kv.first);
         control_t short_hash_result = detail::short_hash(hash_result);
-        auto [index, found] = find_or_prepare_insert(value.first, hash_result, short_hash_result);
+        auto [index, found] = find_or_prepare_insert(kv.first, hash_result, short_hash_result);
         if (found) return {iterator(this, index), false};
-        emplace_at_index(index, short_hash_result, std::move(value.first), std::move(value.second));
+        emplace_at_index(index, short_hash_result, std::move(kv.first), std::move(kv.second));
         ++size_;
         return {iterator(this, index), true};
     }
 
-    // 插入或者赋值，return true = insert, false = assign
-    template <typename M>                                // 这里 mapped_type / ValueType 已是固定类型，&&
-                                                         // 不是万能引用，需要一个新的模板参数
-        requires std::constructible_from<mapped_type, M> // 防止乱传
+    // 插入新的键值对或者覆盖已有键的值，返回真代表插入，返回假代表覆盖
+    template <typename M> // 这里 mapped_type / ValueType 已是固定类型，&& 不是万能引用，需要一个新的模板参数
+        requires std::constructible_from<mapped_type, M>
     std::pair<iterator, bool> insert_or_assign(const key_type &key, M &&mapped) {
         SizeT hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
@@ -560,7 +556,7 @@ public:
         return {iterator(this, index), true};
     }
 
-    // 返回插入或者已存在 key 的 iterator 以及插入是否成功
+    // 接收完整键和完整值，返回指向键值对的迭代器以及是否为新的键值对
     template <typename K, typename M>
         requires(std::constructible_from<key_type, K> && std::constructible_from<mapped_type, M>)
     std::pair<iterator, bool> emplace(K &&key, M &&mapped) {
@@ -568,13 +564,52 @@ public:
         control_t short_hash_result = detail::short_hash(hash_result);
         auto [index, found] = find_or_prepare_insert(key, hash_result, short_hash_result);
         if (found) return {iterator(this, index), false};
-        // ^^^ key exists / key not exists vvv
         emplace_at_index(index, short_hash_result, std::forward<K>(key), std::forward<M>(mapped));
         ++size_;
         return {iterator(this, index), true};
     }
 
-    // 继承 stl 签名，返回删除了几个元素
+    // 接收完整键和值的构造参数，返回指向键值对的迭代器以及是否为新的键值对，若键已存在，不覆盖
+    template <typename... Args>
+        requires std::constructible_from<mapped_type, Args...>
+    std::pair<iterator, bool> try_emplace(const key_type &key, Args &&...args) {
+        SizeT hash_result = hash_key(key);
+        control_t short_hash_result = detail::short_hash(hash_result);
+        auto [index, found] = find_or_prepare_insert(key, hash_result, short_hash_result);
+        if (found) return {iterator(this, index), false}; // key 已经存在
+        std::construct_at(std::addressof(slots_[index].kv), std::piecewise_construct, std::forward_as_tuple(key),
+                          std::forward_as_tuple(std::forward<Args>(args)...));
+        controls_[index] = short_hash_result;
+        ++size_;
+        return {iterator(this, index), true};
+    }
+
+    // 接收完整键和值的构造参数，返回指向键值对的迭代器以及是否为新的键值对，若键已存在，不覆盖（右值版本）
+    template <typename... Args>
+        requires std::constructible_from<mapped_type, Args...>
+    std::pair<iterator, bool> try_emplace(key_type &&key, Args &&...args) {
+        SizeT hash_result = hash_key(key);
+        control_t short_hash_result = detail::short_hash(hash_result);
+        auto [index, found] = find_or_prepare_insert(key, hash_result, short_hash_result);
+        if (found) return {iterator(this, index), false};
+        std::construct_at(std::addressof(slots_[index].kv), std::piecewise_construct,
+                          std::forward_as_tuple(std::move(key)), std::forward_as_tuple(std::forward<Args>(args)...));
+        controls_[index] = short_hash_result;
+        ++size_;
+        return {iterator(this, index), true};
+    }
+
+    // 提供迭代器范围区间并插入键值对
+    template <std::input_iterator InputIt>
+        requires std::convertible_to<std::iter_reference_t<InputIt>, value_type>
+    void insert(InputIt first, InputIt last) {
+        for (; first != last; ++first) insert(*first);
+    }
+
+    // 提供包含键值对的初始化列表并插入所有元素
+    void insert(std::initializer_list<value_type> init) { insert(init.begin(), init.end()); }
+
+    // 返回删除了几个元素
     size_type erase(const key_type &key) {
         if (!controls_ || size_ == 0) return 0;
         SizeT hash_result = hash_key(key);
@@ -589,7 +624,7 @@ public:
     iterator erase(iterator pos) {
         if (pos == end()) return end();
         size_type index = pos.index_;
-        erase_at_index(index); // erase 不负责 rehash
+        erase_at_index(index);
         iterator it(this, index);
         it.skip_to_next_occupied();
         return it;
@@ -660,7 +695,7 @@ private:
         slot_alloc_traits::deallocate(slot_alloc_, slots_, capacity_);
     }
 
-    // 仅转一整个 map 摧毁所有活跃 kv
+    // 仅转一整个 map 摧毁所有活跃 kv，不标记 deleted
     void destroy_all() noexcept {
         for (size_type index = 0; index < capacity_; ++index) {
             control_t control_byte = controls_[index];
@@ -688,37 +723,30 @@ private:
     // 专门为 find_or_prepare_insert 准备的快 rehash 路径，由 deleted > size_ * alpha 触发
     // 确保 capacity >= default min capacity
     void cleanup_rehash() {
-
         deleted_ = 0; // 清理后一定没有墓碑
-
         // 原本有 storage 但没有活跃元素
         if (size_ == 0) {
             deallocate_storage();
             allocate_storage(capacity_);
             return;
         }
-
         // 原本有 storage 也有活跃元素
         auto old_controls = controls_;
         auto old_slots = slots_;
         auto old_capacity = capacity_;
         allocate_storage(capacity_); // 里面重置上面三者，所以需要提前保存
-
         move_old_elements(old_controls, old_slots, old_capacity);
     }
 
-    // 专门为 find_or_prepare_insert 准备的快 rehash 路径，确保 capacity >= k min capacity
+    // 专门为 find_or_prepare_insert 准备的快 rehash 路径，确保 capacity >= default min capacity
     // 因为 used 过多而触发，此处 size 不可能为 0，否则 deleted > size_ * alpha 必然成立，会走上面 cleanup_rehash
     // new_capacity = capacity * 2
     void double_storage() {
-
         auto old_controls = controls_;
         auto old_slots = slots_;
         auto old_capacity = capacity_;
-        allocate_storage(capacity_ * 2); // 里面重置上面三者，所以需要提前保存
-
-        deleted_ = 0; // rehash 之后不会有任何墓碑
-
+        allocate_storage(capacity_ * 2);
+        deleted_ = 0; // 清理后一定没有墓碑
         move_old_elements(old_controls, old_slots, old_capacity);
     }
 
@@ -738,10 +766,10 @@ private:
             }
             index = (index + 1) & mask; // 避免模运算，自动回滚到起点
         }
-        return npos; // 探测完整个 map 都没找到
+        return npos; // map 中无 key
     }
 
-    // rehash 搬迁元素专用，allocate_storage 更新 capacity_ 后使用，别让容量为 0
+    // rehash 搬迁元素专用，allocate_storage 更新 capacity_ 后使用，确保 capacity_ > 0 再调用
     size_type find_insert_index_for_rehash(SizeT hash_result) {
         // 暂时不需要 short hash result，别乱传
         size_type mask = capacity_ - 1;
@@ -806,7 +834,7 @@ private:
         controls_[index] = short_hash_result;
     }
 
-    // 调用 index 处 kv 析构，标记为墓碑，更新 size_ 和 deleted_
+    // 调用 index 处 kv 析构，标记为墓碑，更新 size_ 和 deleted_，无 rehash 行为
     void erase_at_index(size_type index) noexcept {
         std::destroy_at(std::addressof(slots_[index].kv));
         controls_[index] = detail::k_deleted;

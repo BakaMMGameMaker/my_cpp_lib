@@ -86,6 +86,12 @@ static void test_basic_operations() {
     assert(m.capacity() == 8);
     assert(m.deleted() == 0);
 
+    m[2u] = 300u;
+    assert(m.size() == 2);
+    assert(m.at(2u) == 300u);
+    assert(m.capacity() == 8);
+    assert(m.deleted() == 0);
+
     UInt32 &ref3 = m[3u];
     assert(ref3 == 0u); // mapped_type{}
     ref3 = 300u;
@@ -138,6 +144,50 @@ static void test_basic_operations() {
     assert(m.at(42u) == 4242u);
     assert(m.capacity() == 8);
     assert(m.deleted() == 0);
+
+    m.clear();
+    assert(m.size() == 0);
+    m.rehash(0);
+    assert(m.size() == 0);
+    assert(m.capacity() == 0);
+    assert(m.deleted() == 0);
+
+    // try_emplace
+    auto [te_it1, te_inserted1] = m.try_emplace(5u, 555u);
+    assert(te_inserted1);
+    assert(te_it1->second == 555u);
+
+    auto [te_it2, te_inserted2] = m.try_emplace(5u, 777u);
+    assert(!te_inserted2);
+    assert(te_it1->second == 555u);
+    assert(m.size() == 1);
+    assert(m.capacity() == 8);
+
+    {
+        using move_map_t = mcl::flat_hash_map<UInt32, std::unique_ptr<UInt32>>;
+        move_map_t mm;
+        auto up = std::make_unique<UInt32>(99);
+        auto [mit, minserted] = mm.try_emplace(1u, std::move(up));
+        assert(minserted);
+        assert(up == nullptr);
+        assert(*mit->second == 99u);
+    }
+}
+
+static void test_insert_range_and_init_list() {
+    using map_t = mcl::flat_hash_map<UInt32, UInt32>;
+    map_t m;
+
+    std::vector<map_t::value_type> src = {{1u, 10u}, {2u, 20u}, {2u, 200u}};
+    m.insert(src.begin(), src.end());
+    assert(m.size() == 2);
+    assert(m.at(1u) == 10u);
+    assert(m.at(2u) == 20u);
+
+    m.insert({{2u, 999u}, {3u, 30u}});
+    assert(m.size() == 3);
+    assert(m.at(2u) == 20u);
+    assert(m.at(3u) == 30u);
 }
 
 static void test_high_collision() {
@@ -312,6 +362,9 @@ int main() {
 
     test_basic_operations();
     std::cout << "  basic_operations OK\n";
+
+    test_insert_range_and_init_list();
+    std::cout << "  insert range/init list OK\n";
 
     test_high_collision();
     std::cout << "  high_collision OK\n";
