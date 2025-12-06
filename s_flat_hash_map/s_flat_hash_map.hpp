@@ -747,7 +747,12 @@ private:
         requires(std::constructible_from<key_type, K>) // 开头已限制 mapped type 可默认构造
     size_type find_or_insert_default(K &&key, SizeT hash_result, control_t short_hash_result) {
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
-        if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) double_storage();
+        // 可能触发扩容，不得不先看 key 是否存在
+        if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
+            size_type existing = find(key, hash_result, short_hash_result);
+            if (existing != npos) return existing;
+            double_storage(); // capacity *= 2
+        }
         size_type mask = capacity_ - 1;
         size_type index = static_cast<size_type>(hash_result) & mask;
         size_type dist = 0;
@@ -820,7 +825,11 @@ private:
     // 接收右值 kv，若 key 已经存在，返回 kv 索引 + false，否则插入新 kv 返回 insert index + true，并更新 size_
     std::pair<size_type, bool> find_or_insert_kv(SizeT hash_result, control_t short_hash_result, value_type &&kv) {
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
-        if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) double_storage();
+        if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
+            size_type existing = find(kv.first, hash_result, short_hash_result);
+            if (existing != npos) return {existing, false};
+            double_storage();
+        }
 
         size_type mask = capacity_ - 1;
         size_type index = static_cast<size_type>(hash_result) & mask;
@@ -889,8 +898,11 @@ private:
     std::pair<size_type, bool> find_or_try_emplace(SizeT hash_result, control_t short_hash_result, K &&key,
                                                    Args &&...args) {
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
-        // TODO: 不一定真的要插入，小心无意义的 double storage
-        if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) double_storage();
+        if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
+            size_type existing = find(key, hash_result, short_hash_result);
+            if (existing != npos) return {existing, false};
+            double_storage();
+        }
 
         size_type mask = capacity_ - 1;
         size_type index = static_cast<size_type>(hash_result) & mask;
