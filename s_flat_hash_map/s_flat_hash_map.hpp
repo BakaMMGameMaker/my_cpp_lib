@@ -8,6 +8,7 @@
 #include <concepts>
 #include <cstddef>
 #include <emmintrin.h>
+#include <functional>
 #include <immintrin.h>
 #include <initializer_list>
 #include <iterator>
@@ -41,9 +42,6 @@ inline constexpr SizeT k_min_capacity = 8;                          // 逻辑允
 inline constexpr float k_default_max_load_factor = 0.875f;          // 7/8 减少 Group 全 FULL 的概率 (7%)
 inline constexpr int k_group_width = 16;                            // 一组 16 个 control_t
 // EMPTY 非常重要，特别是查找不存在的 key 的时候，越早遇到 key 就能越早返回 false，避免了对整张表完全查询
-
-// 避免运行时计算
-constexpr __m128i empty_target = _mm_set1_epi8(static_cast<char>(k_empty));
 
 // 数值是否为 2 的次幂
 inline constexpr bool is_power_of_two(SizeT x) noexcept {
@@ -1159,9 +1157,12 @@ private:
     size_type simple_find(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
         if (capacity_ == 0) return npos;
 
-        // capacity = 8 （或者说小于组宽）的时候，不用 SIMD 只会造成麻烦
-        if (capacity_ < static_cast<size_type>(detail::k_group_width))
-            return simple_find_small(key, hash_result, short_hash_result);
+        // capacity < 64 暴力线性扫描
+        if (capacity_ < 64) return simple_find_small(key, hash_result, short_hash_result);
+
+        // 缓存指针
+        auto *controls = controls_;
+        auto *slots = slots_;
 
         // capacity >= group width 且为 2 的次幂
         size_type bucket_mask = capacity_ - 1;
@@ -1177,14 +1178,17 @@ private:
 #endif
         // circle 1
         {
-            const control_t *group_ctrl = controls_ + base_bucket;
+            const control_t *group_ctrl = controls + base_bucket;
             const __m128i ctrl = _mm_loadu_si128(reinterpret_cast<const __m128i *>(group_ctrl));
+            UInt32 group_bits =
+                static_cast<UInt32>(_mm_movemask_epi8(ctrl)); // 收集 16 个控制字节的最高位为一个 bitmask
+            UInt32 offset_mask = ~UInt32{0} << first_offset;
             UInt32 match_mask = static_cast<UInt32>(_mm_movemask_epi8(_mm_cmpeq_epi8(ctrl, short_hash_target)));
-            UInt32 valid_mask = match_mask & (~UInt32{0} << first_offset); // 屏蔽低位 offset 个 buckets
+            UInt32 valid_mask = match_mask & offset_mask; // 屏蔽低位 offset 个 buckets
             while (valid_mask) {
                 unsigned bit = static_cast<unsigned>(std::countr_zero(valid_mask)); // 第一个指纹匹配的位置
                 size_type index = base_bucket + static_cast<size_type>(bit);
-                if (equal_(slots_[index].kv.first, key)) {
+                if (equal_(slots[index].kv.first, key)) {
 #ifdef DEBUG
                     SizeT visited = buckets_visited + (static_cast<SizeT>(bit) - static_cast<SizeT>(first_offset) + 1);
                     record_probe(visited);
@@ -1193,9 +1197,8 @@ private:
                 }
                 valid_mask &= (valid_mask - 1);
             }
-            UInt32 empty_mask = static_cast<UInt32>(_mm_movemask_epi8(_mm_cmpeq_epi8(ctrl, detail::empty_target)));
-            UInt32 empty_after = empty_mask & (~UInt32{0} << first_offset);
-            if (empty_after != 0) {
+            UInt32 empty_after = group_bits & offset_mask;
+            if (empty_after) {
 #ifdef DEBUG
                 unsigned bit = static_cast<unsigned>(std::countr_zero(empty_after));
                 SizeT visited = buckets_visited + (static_cast<SizeT>(bit) - static_cast<SizeT>(first_offset) + 1);
@@ -1211,16 +1214,17 @@ private:
         // 后续组别
         for (;;) {
             base_bucket = (base_bucket + static_cast<size_type>(detail::k_group_width)) & bucket_mask; // 组头下标
-            const control_t *group_ctrl = controls_ + base_bucket;                                     // 指向组头的指针
+            const control_t *group_ctrl = controls + base_bucket;                                      // 指向组头的指针
             const __m128i ctrl = _mm_loadu_si128(reinterpret_cast<const __m128i *>(group_ctrl));
+            UInt32 group_bits = static_cast<UInt32>(_mm_movemask_epi8(ctrl));
             UInt32 match_mask = static_cast<UInt32>(_mm_movemask_epi8(_mm_cmpeq_epi8(ctrl, short_hash_target)));
             while (match_mask) { // 有任一指纹匹配
                 // 低位有多少连续 0，相当于第一个匹配的位置，unsigned 与 countr_zero 搭配
                 unsigned bit = static_cast<unsigned>(std::countr_zero(match_mask));
                 size_type index = base_bucket + static_cast<size_type>(bit); // 不用取模，范围一定合法
-                if (equal_(slots_[index].kv.first, key)) {
+                if (equal_(slots[index].kv.first, key)) {
 #ifdef DEBUG
-                    SizeT visited = buckets_visited + static_cast<SizeT>(bit) + 1;
+                    SizeT visited = buckets_visited + (static_cast<SizeT>(bit) - static_cast<SizeT>(first_offset) + 1);
                     record_probe(visited);
 #endif
                     return index;
@@ -1229,8 +1233,8 @@ private:
             }
             // 到这里说明当前组没有相同 key，如果 key 存在，至少在下一组
             // 然而如果当前组有 empty 位置，说明 key 不存在
-            UInt32 empty_mask = static_cast<UInt32>(_mm_movemask_epi8(_mm_cmpeq_epi8(ctrl, detail::empty_target)));
-            if (empty_mask != 0) { // 有 empty bucket
+            // UInt32 empty_mask = group_bits
+            if (group_bits) { // 有 empty bucket
 #ifdef DEBUG
                 unsigned bit = static_cast<unsigned>(std::countr_zero(empty_mask));
                 SizeT visited = buckets_visited + static_cast<SizeT>(bit) + 1;
