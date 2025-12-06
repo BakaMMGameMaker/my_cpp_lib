@@ -17,7 +17,7 @@ namespace {
 // key 分布
 enum class KeyDistribution : std::uint32_t { kSequential = 0, kRandom = 1, kClustered = 2 };
 
-constexpr std::array<std::size_t, 3> kSizes = {1 << 5, 1 << 14, 1 << 18};
+constexpr std::array<std::size_t, 3> kSizes = {1 << 14, 1 << 18};
 constexpr std::array<float, 2> kLoadFactors = {0.75f, 0.875f};
 
 template <class Map> void apply_max_load_factor(Map &map, float max_load_factor) {
@@ -215,6 +215,58 @@ static void BM_InsertKeys(benchmark::State &state, KeyDistribution dist, float m
 }
 
 template <class Map, class Key>
+static void BM_InsertDuplicateKeys(benchmark::State &state, KeyDistribution dist, float max_load_factor) {
+    const std::size_t N = static_cast<std::size_t>(state.range(0));
+    const auto dataset = prepare_int_dataset<Key>(dist, N);
+
+    Map map;
+    apply_max_load_factor(map, max_load_factor);
+    fill_map_with_keys(map, dataset.keys); // 先插满，后面全部是重复插入
+
+    DebugCounters counters;
+    const auto label = build_label(dist, max_load_factor);
+
+    for (auto _ : state) {
+        for (std::size_t i = 0; i < N; ++i) {
+            auto res = map.emplace(dataset.keys[i], static_cast<std::uint32_t>(i));
+            benchmark::DoNotOptimize(res);
+        }
+        state.PauseTiming();
+        counters.add(map);
+        state.ResumeTiming();
+    }
+
+    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(N));
+    counters.publish(state, max_load_factor, label);
+}
+
+template <class Map, class Key>
+static void BM_FindMiss(benchmark::State &state, KeyDistribution dist, float max_load_factor) {
+    const std::size_t N = static_cast<std::size_t>(state.range(0));
+    const auto dataset = prepare_int_dataset<Key>(dist, N);
+
+    Map map;
+    apply_max_load_factor(map, max_load_factor);
+    fill_map_with_keys(map, dataset.keys); // miss_keys 必定不存在
+
+    DebugCounters counters;
+    const auto label = build_label(dist, max_load_factor);
+
+    for (auto _ : state) {
+        for (std::size_t i = 0; i < N; ++i) {
+            auto it = map.find(dataset.miss_keys[i]);
+            benchmark::DoNotOptimize(it);
+        }
+        state.PauseTiming();
+        counters.add(map);
+        state.ResumeTiming();
+    }
+
+    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(N));
+    counters.publish(state, max_load_factor, label);
+}
+
+template <class Map, class Key>
 static void BM_FindHit(benchmark::State &state, KeyDistribution dist, float max_load_factor) {
     const std::size_t N = static_cast<std::size_t>(state.range(0));
     const auto dataset = prepare_int_dataset<Key>(dist, N);
@@ -370,6 +422,57 @@ template <class Map> static void BM_StringFindHit(benchmark::State &state, float
     state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(N));
     counters.publish(state, max_load_factor, label);
 }
+template <class Map> static void BM_StringInsertDuplicate(benchmark::State &state, float max_load_factor) {
+    const std::size_t N = static_cast<std::size_t>(state.range(0));
+    const auto dataset = prepare_string_dataset(N);
+    const auto map_keys = materialize_map_keys<Map>(dataset);
+
+    Map map;
+    apply_max_load_factor(map, max_load_factor);
+    fill_map_with_keys(map, map_keys.keys); // 先插一次，后面全是重复插入
+
+    DebugCounters counters;
+    const auto label = build_string_label(max_load_factor);
+
+    for (auto _ : state) {
+        for (std::size_t i = 0; i < N; ++i) {
+            auto res = map.emplace(map_keys.keys[i], static_cast<std::uint32_t>(i));
+            benchmark::DoNotOptimize(res);
+        }
+        state.PauseTiming();
+        counters.add(map);
+        state.ResumeTiming();
+    }
+
+    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(N));
+    counters.publish(state, max_load_factor, label);
+}
+
+template <class Map> static void BM_StringFindMiss(benchmark::State &state, float max_load_factor) {
+    const std::size_t N = static_cast<std::size_t>(state.range(0));
+    const auto dataset = prepare_string_dataset(N);
+    const auto map_keys = materialize_map_keys<Map>(dataset);
+
+    Map map;
+    apply_max_load_factor(map, max_load_factor);
+    fill_map_with_keys(map, map_keys.keys); // miss_keys 肯定不在表里
+
+    DebugCounters counters;
+    const auto label = build_string_label(max_load_factor);
+
+    for (auto _ : state) {
+        for (std::size_t i = 0; i < N; ++i) {
+            auto it = map.find(map_keys.miss_keys[i]);
+            benchmark::DoNotOptimize(it);
+        }
+        state.PauseTiming();
+        counters.add(map);
+        state.ResumeTiming();
+    }
+
+    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(N));
+    counters.publish(state, max_load_factor, label);
+}
 
 // ---------------- 注册所有基准 ----------------
 
@@ -394,11 +497,18 @@ template <class Map, class Key> void register_int_family(const std::string &pref
 
         auto *find_hit = benchmark::RegisterBenchmark((prefix + "_find_hit_" + suffix).c_str(), &BM_FindHit<Map, Key>,
                                                       kDist, load_factor);
+        auto *insert_dup = benchmark::RegisterBenchmark((prefix + "_insert_dup_" + suffix).c_str(),
+                                                        &BM_InsertDuplicateKeys<Map, Key>, kDist, load_factor);
+
+        auto *find_miss = benchmark::RegisterBenchmark((prefix + "_find_miss_" + suffix).c_str(),
+                                                       &BM_FindMiss<Map, Key>, kDist, load_factor);
 
         for (auto size : kSizes) {
             const auto arg = static_cast<std::int64_t>(size);
             insert->Arg(arg);
             find_hit->Arg(arg);
+            insert_dup->Arg(arg);
+            find_miss->Arg(arg);
         }
     }
 }
@@ -417,10 +527,20 @@ template <class Map> void register_string_family(const std::string &prefix) {
                 BM_StringFindHit<Map>(st, load_factor);
             });
 
+        auto *insert_dup = benchmark::RegisterBenchmark(
+            (prefix + "_insert_dup_" + suffix).c_str(),
+            [load_factor](benchmark::State &st) { BM_StringInsertDuplicate<Map>(st, load_factor); });
+
+        auto *find_miss = benchmark::RegisterBenchmark(
+            (prefix + "_find_miss_" + suffix).c_str(),
+            [load_factor](benchmark::State &st) { BM_StringFindMiss<Map>(st, load_factor); });
+
         for (auto size : kSizes) {
             const auto arg = static_cast<std::int64_t>(size);
             insert->Arg(arg);
             find_hit->Arg(arg);
+            insert_dup->Arg(arg);
+            find_miss->Arg(arg);
         }
     }
 }

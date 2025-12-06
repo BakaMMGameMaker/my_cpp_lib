@@ -25,13 +25,9 @@
 namespace mcl {
 
 namespace detail {
-// 定义控制字节 control_t = UInt8，有利于 SIMD，并避免花费过多时间比对 key
 // - 0x80(10000000) 表示 EMPTY
 // - 0xFE(11111110) 表示 DELETED
-// - 0xFF(11111111) 表示 SENTINEL 哨兵值，访问到这里说明真实的 control_t 已经全部访问完毕，避免模运算
-// - 最高位为 0 代表槽位被占据，即 FULL 范围为 0x00-0x7F (0-127)，冲突概率 1/128
-// 虽然浪费了 10000001-11111110 但是为了极致的性能，这是必须放弃的编码空间
-// 低 7 位放哈希高位混淆结果，避免全表线性扫描
+// - 0xFF(11111111) 表示 SENTINEL
 using control_t = UInt8; // 控制字节
 
 // inline 允许跨多翻译单元重复定义，适用于 header-only 常量
@@ -41,22 +37,12 @@ inline constexpr control_t k_sentinel = static_cast<control_t>(-1); // 0xFF SENT
 inline constexpr SizeT k_min_capacity = 8;                          // 逻辑允许最大元素数量 = capacity * max load factor
 inline constexpr float k_default_max_load_factor = 0.875f;          // 7/8 减少 Group 全 FULL 的概率 (7%)
 inline constexpr int k_group_width = 16;                            // 一组 16 个 control_t
-// EMPTY 非常重要，特别是查找不存在的 key 的时候，越早遇到 key 就能越早返回 false，避免了对整张表完全查询
 
 // 数值是否为 2 的次幂
-inline constexpr bool is_power_of_two(SizeT x) noexcept {
-    // 如果是 2 的次幂，那么只有一位 1，x - 1 后会得到 0111...，再做按位与与运算结果为 0
-    return x && ((x & (x - 1)) == 0);
-}
+inline constexpr bool is_power_of_two(SizeT x) noexcept { return x && ((x & (x - 1)) == 0); }
 
-// >= x 的下一个 2 的次幂
-// 666 谁写的代码返回值是 bool 已 fixed
-// 不要传 <= 1 的值进来，0 分支
 inline constexpr SizeT next_power_of_two(SizeT x) noexcept {
-    // if (x <= 1) return 1; // 2^0 = 1
-    // 通过扩散最高位，避免循环带来的分支，完全内联，缓存友好，更加高效
-    --x; // 防止原本就是 2 的次幂的数字跳转到下一个数
-    // 往低位扩散最高位
+    --x;
     x |= x >> 1; // 最高位和第二高位都为 1
     x |= x >> 2; // 前四高位都为 1
     x |= x >> 4;
@@ -65,7 +51,7 @@ inline constexpr SizeT next_power_of_two(SizeT x) noexcept {
 #if SIZE_MAX > 0xFFFFFFFFu // 仅在 64bit 架构，即 size_t = UInt64 时执行
     x |= x >> 32;          // 确保 64 位都为 1
 #endif
-    return x + 1; // 进位，超过最高位时会溢出变为 0，但不是正常表应该出现的情况
+    return x + 1;
 }
 
 // 7-bit hash 指纹
@@ -84,8 +70,6 @@ concept HashValue = std::default_initializable<ValueType> && std::move_construct
                     std::destructible<ValueType> && std::is_nothrow_move_constructible_v<ValueType>;
 
 // Hasher 概念约束
-// 哈希表内部需要存一个 hasher 对象，copy map, move map 的时候都要构造新的 hasher
-// 要求无抛：Hasher 构造与移动本来就不应该抛出，没有必要为它编写复杂的异常安全保证
 template <typename HasherType, typename KeyType>
 concept HashFor =
     requires(const HasherType &hasher, const KeyType &key) {
@@ -94,7 +78,6 @@ concept HashFor =
     && std::is_nothrow_default_constructible_v<HasherType>; // 能默认构造且无抛
 
 // Equal 概念约束
-// 哈希表内部需要存储判等器，允许用户自定义同一 KeyType 不同的比较逻辑，而不是仅依赖 KeyType 的 operator==
 template <typename KeyEqualType, typename KeyType>
 concept EqualFor = requires(const KeyEqualType &e, const KeyType &a, const KeyType &b) {
     { e(a, b) } noexcept -> std::same_as<bool>; // 必须返回 bool 且无抛
@@ -762,9 +745,12 @@ private:
         size_type mask = capacity_ - 1;
         size_type index = static_cast<size_type>(hash_result) & mask;
         size_type dist = 0;
-        std::optional<value_type> cur_kv; // 真正需要时再 emplace
-        SizeT cur_hash = 0;
-        control_t cur_ctrl = 0;
+
+        alignas(value_type) UChar cur_kv_storage[sizeof(value_type)];
+        value_type *cur_kv = nullptr;
+
+        SizeT cur_hash = hash_result;
+        control_t cur_ctrl = short_hash_result;
         bool need_check_duplicate = true; // 仍需要查找重复键
 #ifdef DEBUG
         SizeT probe_len = 0;
@@ -773,24 +759,23 @@ private:
 #ifdef DEBUG
             ++probe_len;
 #endif
-            control_t control_byte = controls_[index];
-            if (control_byte == detail::k_empty) {
-                if (!cur_kv) {
-                    cur_kv.emplace(key_type(std::forward<K>(key)), mapped_type{});
-                    cur_hash = hash_result;
-                    cur_ctrl = short_hash_result;
-                }
-                std::construct_at(std::addressof(slots_[index].kv), std::move(*cur_kv));
-                slots_[index].hash = cur_hash;
-                controls_[index] = cur_ctrl;
+            control_t &ctrl_ref = controls_[index];
+            Slot &slot_ref = slots_[index];
+            if (ctrl_ref == detail::k_empty) {
+                ctrl_ref = cur_ctrl;
+                slot_ref.hash = cur_hash;
+                if (!cur_kv)
+                    std::construct_at(std::addressof(slot_ref.kv), std::piecewise_construct,
+                                      std::forward_as_tuple(std::forward<K>(key)), std::forward_as_tuple());
+                else std::construct_at(std::addressof(slot_ref.kv), std::move(*cur_kv));
                 ++size_;
 #ifdef DEBUG
                 record_probe(probe_len);
 #endif
                 return index;
             }
-            if (control_byte == short_hash_result && need_check_duplicate) { // 大部分指纹不匹配，放前面
-                if (equal_(slots_[index].kv.first, key)) {
+            if (ctrl_ref == short_hash_result && need_check_duplicate) { // 大部分指纹不匹配
+                if (equal_(slot_ref.kv.first, key)) {
 #ifdef DEBUG
                     record_probe(probe_len);
 #endif
@@ -798,24 +783,24 @@ private:
                 }
             }
             // 当前 index kv 信息
-            SizeT existing_hash = slots_[index].hash;
+            SizeT existing_hash = slot_ref.hash;
             size_type existing_home = static_cast<size_type>(existing_hash) & mask;
             size_type existing_dist = (index + capacity_ - existing_home) & mask;
             if (existing_dist < dist) {
                 // 进入这里，说明原始 key 不再表中，后续不必查重
                 need_check_duplicate = false;
-                if (!cur_kv) { // 原本传入的 key 的确不存在，构造 optional kv
-                    cur_kv.emplace(key_type(std::forward<K>(key)), mapped_type{});
-                    cur_hash = hash_result;
-                    cur_ctrl = short_hash_result;
-                }
-                value_type tmp_kv = std::move(slots_[index].kv);
-                SizeT tmp_hash = slots_[index].hash;
-                control_t tmp_ctrl = control_byte;
 
-                slots_[index].kv = std::move(*cur_kv);
-                slots_[index].hash = cur_hash;
-                controls_[index] = cur_ctrl;
+                if (!cur_kv)
+                    cur_kv = std::construct_at(reinterpret_cast<value_type *>(cur_kv_storage), std::piecewise_construct,
+                                               std::forward_as_tuple(std::forward<K>(key)), std::forward_as_tuple());
+
+                value_type tmp_kv = std::move(slot_ref.kv);
+                SizeT tmp_hash = slot_ref.hash;
+                control_t tmp_ctrl = ctrl_ref;
+
+                slot_ref.kv = std::move(*cur_kv);
+                slot_ref.hash = cur_hash;
+                ctrl_ref = cur_ctrl;
 
                 *cur_kv = std::move(tmp_kv);
                 cur_hash = tmp_hash;
@@ -1236,7 +1221,7 @@ private:
             // UInt32 empty_mask = group_bits
             if (group_bits) { // 有 empty bucket
 #ifdef DEBUG
-                unsigned bit = static_cast<unsigned>(std::countr_zero(empty_mask));
+                unsigned bit = static_cast<unsigned>(std::countr_zero(group_bits));
                 SizeT visited = buckets_visited + static_cast<SizeT>(bit) + 1;
                 record_probe(visited);
 #endif
