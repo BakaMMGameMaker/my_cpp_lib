@@ -3,13 +3,16 @@
 
 #include "salias.h"
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <concepts>
 #include <cstddef>
+#include <emmintrin.h>
 #include <immintrin.h>
 #include <initializer_list>
 #include <iterator>
 #include <memory>
+#include <mmintrin.h>
 #include <optional>
 #include <stdexcept>
 #include <tuple>
@@ -33,9 +36,34 @@ using control_t = UInt8; // 控制字节
 // inline 允许跨多翻译单元重复定义，适用于 header-only 常量
 inline constexpr control_t k_empty = static_cast<control_t>(-128); // 0x80 EMPTY
 // inline constexpr control_t k_deleted = static_cast<control_t>(-2); // 0xFE DELETED [[deprecated]]
-inline constexpr SizeT k_min_capacity = 8;                 // 逻辑允许最大元素数量 = capacity * max load factor
-inline constexpr float k_default_max_load_factor = 0.875f; // 7/8 减少 Group 全 FULL 的概率 (7%)
+inline constexpr control_t k_sentinel = static_cast<control_t>(-1); // 0xFF SENTINAL
+inline constexpr SizeT k_min_capacity = 8;                          // 逻辑允许最大元素数量 = capacity * max load factor
+inline constexpr float k_default_max_load_factor = 0.875f;          // 7/8 减少 Group 全 FULL 的概率 (7%)
+inline constexpr int k_group_width = 16;                            // 一组 16 个 control_t
 // EMPTY 非常重要，特别是查找不存在的 key 的时候，越早遇到 key 就能越早返回 false，避免了对整张表完全查询
+
+// SIMD group，一次处理 16 个 control byte
+struct Group {
+    static constexpr int k_width = k_group_width;
+    __m128i ctrl;
+    explicit Group(const control_t *ptr) noexcept : ctrl(_mm_loadu_si128(reinterpret_cast<const __m128i *>(ptr))) {}
+
+    // 返回与指纹相等的位置 bitmask
+    [[nodiscard]] UInt32 match_hash(control_t h7) const noexcept {
+        __m128i target = _mm_set1_epi8(static_cast<char>(h7));
+        __m128i cmp = _mm_cmpeq_epi8(ctrl, target);
+        return static_cast<UInt32>(_mm_movemask_epi8(cmp));
+    }
+
+    // 返回 empty 的 bitmask
+    [[nodiscard]] UInt32 match_empty() const noexcept {
+        __m128i empty = _mm_set1_epi8(static_cast<char>(k_empty));
+        __m128i cmp = _mm_cmpeq_epi8(ctrl, empty);
+        return static_cast<UInt32>(_mm_movemask_epi8(cmp));
+    }
+
+    // 返回 UInt32 是指令要求，虽然只有 16 位真正被使用
+};
 
 // 数值是否为 2 的次幂
 inline constexpr bool is_power_of_two(SizeT x) noexcept {
@@ -1058,18 +1086,22 @@ private:
         throw;
     }
 
-    // 仅开空间，更新 capacity_，新地方全设为 empty
+    // 仅开空间，更新 capacity_，新地方全设为 empty，尾部填充 sentinel
     void allocate_storage(size_type capacity) {
-        controls_ = control_alloc_.allocate(capacity);
+        controls_ = control_alloc_.allocate(capacity + detail::k_group_width);
         slots_ = slot_alloc_traits::allocate(slot_alloc_, capacity);
         capacity_ = capacity;
         // 初始化为全 EMPTY
-        for (size_type index = 0; index < capacity; ++index) { controls_[index] = detail::k_empty; }
+        for (size_type index = 0; index < capacity_; ++index) { controls_[index] = detail::k_empty; }
+        // 尾部 k group width 个位置填充哨兵值，确保任意起点加载 k group width 字节都不会越界
+        for (size_type index = capacity_; index < capacity_ + detail::k_group_width; ++index) {
+            controls_[index] = detail::k_sentinel;
+        }
     }
 
     // 仅释放空间，不重置任何成员，保证 capacity > 0 再调用
     void deallocate_storage() noexcept {
-        control_alloc_.deallocate(controls_, capacity_);
+        control_alloc_.deallocate(controls_, capacity_ + detail::k_group_width);
         slot_alloc_traits::deallocate(slot_alloc_, slots_, capacity_);
     }
 
@@ -1095,7 +1127,7 @@ private:
             emplace_at_index(insert_index, hash_result, control_byte, std::move(kv.first), std::move(kv.second));
             std::destroy_at(std::addressof(kv)); // 调用析构函数
         }
-        control_alloc_.deallocate(old_controls, old_capacity);
+        control_alloc_.deallocate(old_controls, old_capacity + detail::k_group_width);
         slot_alloc_traits::deallocate(slot_alloc_, old_slots, old_capacity);
     }
 
@@ -1114,10 +1146,8 @@ private:
         move_old_elements(old_controls, old_slots, old_capacity);
     }
 
-    // 提供哈希值和控制字节，返回 key 的 index，不存在则返回 npos，不利用早停机制
-    // benchmark 显示 u32 场景下提速百分之八以上
-    size_type simple_find(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
-        if (capacity_ == 0) return npos;
+    // 小表，不走 SIMD
+    size_type simple_find_small(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
         size_type mask = capacity_ - 1;
         size_type index = static_cast<size_type>(hash_result) & mask;
 #ifdef DEBUG
@@ -1141,6 +1171,78 @@ private:
                 return index;
             }
             index = (index + 1) & mask;
+        }
+        return npos;
+    }
+
+    // 提供哈希值和控制字节，返回 key 的 index，不存在则返回 npos，不利用早停机制
+    // benchmark 显示 u32 场景下提速百分之八以上
+    size_type simple_find(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
+        if (capacity_ == 0) return npos;
+
+        // capacity = 8 （或者说小于组宽）的时候，用 SIMD 只会造成麻烦，比如引入哨兵值
+        if (capacity_ < static_cast<size_type>(detail::k_group_width))
+            return simple_find_small(key, hash_result, short_hash_result);
+
+        // capacity >= group width 且为 2 的次幂
+        size_type bucket_mask = capacity_ - 1;
+        size_type group_count = capacity_ / static_cast<size_type>(detail::k_group_width); // 也是 2 的次幂
+        size_type group_mask = group_count - 1;
+        size_type home_bucket = static_cast<size_type>(hash_result) & bucket_mask;             // 探测起点
+        size_type group_index = (home_bucket / static_cast<size_type>(detail::k_group_width)); // 起点所在组别的索引
+        size_type first_offset =
+            home_bucket & (static_cast<size_type>(detail::k_group_width) - 1); // 起点相对组头位置偏移
+        size_type offset = first_offset;
+#ifdef DEBUG
+        SizeT probe_len = 0; // 依然是访问过的 bucket 数量
+#endif
+        for (;;) {
+            size_type base_bucket = group_index * static_cast<size_type>(detail::k_group_width); // 组头下标
+            control_t *group_ctrl = controls_ + base_bucket;                                     // 指向组头的指针
+            detail::Group g(group_ctrl);
+            UInt32 match_mask = g.match_hash(short_hash_result); // 指纹匹配的 mask
+
+            // TODO: 分离 fisrt circle 与后续 circle
+            UInt32 valid_mask = match_mask & (~UInt32{0} << offset); // 第一轮要屏蔽低位 offset 个 buckets
+            while (valid_mask) {                                     // 有任一指纹匹配
+                // 低位有多少连续 0，相当于第一个匹配的位置，unsigned 与 countr_zero 搭配
+                unsigned bit = static_cast<unsigned>(std::countr_zero(valid_mask));
+                size_type index = base_bucket + static_cast<size_type>(bit); // 不用取模，范围一定合法
+                if (equal_(slots_[index].kv.first, key)) {
+#ifdef DEBUG // TODO：有必要检查一下这里的计算是否正确
+             // 访问 bucket 数 = 前面完整 group * 16 + 当前 group 内的偏移 - first_offset + 1
+                    SizeT buckets_visited =
+                        static_cast<SizeT>(group_index) * static_cast<SizeT>(detail::k_group_width) +
+                        static_cast<SizeT>(bit) - static_cast<SizeT>(first_offset) + 1;
+                    probe_len += buckets_visited;
+                    record_probe(probe_len);
+#endif
+                    return index;
+                }
+                valid_mask &= (valid_mask - 1); // 清理最低位的 1
+            }
+            // 到这里说明当前组没有相同 key，如果 key 存在，至少在下一组
+            // 然而如果当前组有 empty 位置，说明 key 不存在
+            UInt32 empty_mask = g.match_empty();
+            UInt32 empty_after = empty_mask & (~UInt32{0} << offset);
+            if (empty_after != 0) { // 有 empty bucket
+#ifdef DEBUG
+                unsigned bit = static_cast<unsigned>(std::countr_zero(empty_after));
+                SizeT buckets_visited = static_cast<SizeT>(group_index) * static_cast<SizeT>(detail::k_group_width) +
+                                        static_cast<SizeT>(bit) - static_cast<SizeT>(first_offset) + 1;
+                probe_len += buckets_visited;
+                record_probe(probe_len);
+#endif
+                return npos;
+            }
+            // 当前组没有 key 也无 empty
+
+#ifdef DEBUG
+            // 整组 16 个 bucket 都走完了
+            probe_len += static_cast<SizeT>(detail::k_group_width - offset);
+#endif
+            offset = 0; // 后续都没有初始偏移
+            group_index = (group_index + 1) & group_mask;
         }
         return npos;
     }

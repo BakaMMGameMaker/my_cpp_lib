@@ -213,7 +213,10 @@ static void test_shrink_to_fit() {
     assert(m2.capacity() == 128);
 
     for (UInt32 i = 0; i < 10; ++i) m2.emplace(i, i * 10u);
-    for (UInt32 i = 0; i < 3; ++i) assert(m2.erase(i) == 1);
+    for (UInt32 i = 0; i < 3; ++i) {
+        assert(m2.contains(i));
+        assert(m2.erase(i) == 1);
+    }
     assert(m2.size() == 7);
 
     m2.shrink_to_fit();
