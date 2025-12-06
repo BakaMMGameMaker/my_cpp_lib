@@ -894,7 +894,7 @@ private:
             // size_type existing = robin_hood_find(key, hash_result, short_hash_result);
             size_type existing = simple_find(key, hash_result, short_hash_result);
             if (existing != npos) {
-                slots_[existing].kv.second = mapped;
+                slots_[existing].kv.second = std::forward<M>(mapped);
                 return {existing, false};
             }
             double_storage();
@@ -904,7 +904,8 @@ private:
         size_type index = static_cast<size_type>(hash_result) & mask;
         size_type dist = 0;
 
-        std::optional<value_type> cur_kv;
+        alignas(value_type) unsigned char cur_kv_storage[sizeof(value_type)];
+        value_type *cur_kv = nullptr;
 
         SizeT cur_hash = hash_result;
         control_t cur_ctrl = short_hash_result;
@@ -916,14 +917,18 @@ private:
 #ifdef DEBUG
             ++probe_len;
 #endif
-            control_t control_byte = controls_[index];
-            if (control_byte == detail::k_empty) {
+            control_t &ctrl_ref = controls_[index];
+            Slot &slot_ref = slots_[index];
+            if (ctrl_ref == detail::k_empty) {
+                ctrl_ref = cur_ctrl;
+                slot_ref.hash = cur_hash;
                 // 不能 move，可能把用户传入的左值偷走
-                if (!cur_kv) cur_kv.emplace(std::forward<K>(key), std::forward<M>(mapped));
+                if (!cur_kv)
+                    std::construct_at(std::addressof(slot_ref.kv), std::piecewise_construct,
+                                      std::forward_as_tuple(std::forward<K>(key)),
+                                      std::forward_as_tuple(std::forward<M>(mapped)));
+                else std::construct_at(std::addressof(slot_ref.kv), std::move(*cur_kv));
                 // 下面的 move 不会再拷贝一次，因为 value type 中无 const
-                std::construct_at(std::addressof(slots_[index].kv), std::move(*cur_kv));
-                slots_[index].hash = cur_hash;
-                controls_[index] = cur_ctrl;
                 ++size_;
 #ifdef DEBUG
                 record_probe(probe_len);
@@ -931,29 +936,32 @@ private:
                 // 此处 cur kv ptr 必然存在
                 return {index, true};
             }
-            if (control_byte == short_hash_result && need_check_duplicate) {
-                if (equal_(slots_[index].kv.first, key)) {
-                    // 可能有问题，RR的时候，mapped 已经被提前 move 过了
-                    slots_[index].kv.second = std::forward<M>(mapped); // 能 move 就 move，不能 move 就拷贝
+            if (ctrl_ref == short_hash_result && need_check_duplicate) {
+                if (equal_(slot_ref.kv.first, key)) {
+                    slot_ref.kv.second = std::forward<M>(mapped); // 能 move 就 move，不能 move 就拷贝
 #ifdef DEBUG
                     record_probe(probe_len);
 #endif
+                    // 到这里，cur kv 一定为空，要是 cur kv 被构造过，压根不会有重复 key
                     return {index, false}; // 覆盖
                 }
             }
-            SizeT existing_hash = slots_[index].hash;
+            SizeT existing_hash = slot_ref.hash;
             size_type existing_home = static_cast<size_type>(existing_hash) & mask;
             size_type existing_dist = (index + capacity_ - existing_home) & mask;
             if (existing_dist < dist) {
                 need_check_duplicate = false;
-                if (!cur_kv) cur_kv.emplace(std::forward<K>(key), std::forward<M>(mapped));
-                value_type tmp_kv = std::move(slots_[index].kv);
-                SizeT tmp_hash = slots_[index].hash;
-                control_t tmp_ctrl = control_byte;
+                if (!cur_kv)
+                    cur_kv = std::construct_at(reinterpret_cast<value_type *>(cur_kv_storage), std::piecewise_construct,
+                                               std::forward_as_tuple(std::forward<K>(key)),
+                                               std::forward_as_tuple(std::forward<M>(mapped)));
+                value_type tmp_kv = std::move(slot_ref.kv);
+                SizeT tmp_hash = slot_ref.hash;
+                control_t tmp_ctrl = ctrl_ref;
 
-                slots_[index].kv = std::move(*cur_kv);
-                slots_[index].hash = cur_hash;
-                controls_[index] = cur_ctrl;
+                slot_ref.kv = std::move(*cur_kv);
+                slot_ref.hash = cur_hash;
+                ctrl_ref = cur_ctrl;
 
                 *cur_kv = std::move(tmp_kv);
                 cur_hash = tmp_hash;
