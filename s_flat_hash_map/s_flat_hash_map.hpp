@@ -81,6 +81,12 @@ template <typename KeyEqualType, typename KeyType>
 concept EqualFor = requires(const KeyEqualType &e, const KeyType &a, const KeyType &b) {
     { e(a, b) } noexcept -> std::same_as<bool>; // 必须返回 bool 且无抛
 } && std::is_nothrow_move_constructible_v<KeyEqualType> && std::is_nothrow_default_constructible_v<KeyEqualType>;
+
+// u32 与 u64 不存 full hash，现场算
+template <typename Key, typename Hash>
+inline constexpr bool k_store_hash =
+    !(std::is_integral_v<Key> && (sizeof(Key) == 4 || sizeof(Key) == 8) && std::is_same_v<Hash, std::hash<Key>>);
+
 } // namespace detail
 
 template <typename KeyType, typename ValueType, typename HasherType = std::hash<KeyType>,
@@ -107,10 +113,16 @@ public:
     using allocator_type = Alloc;
 
 private:
-    struct Slot {
+    static constexpr bool k_store_hash = detail::k_store_hash<key_type, hasher_type>;
+
+    struct SlotHashStorage {
+        SizeT hash;
+    };
+
+    struct SlotNoHashStorage {};
+
+    struct Slot : std::conditional_t<k_store_hash, SlotHashStorage, SlotNoHashStorage> {
         value_type kv;
-        // TODO: 对于特定类型 key，存 hash 还没算 hash 快，可以针对一些类型单开类，算 hash 而非拿
-        SizeT hash; // 完整 hash，用于 robin hoold 算 probe distance
     };
 
 #ifdef DEBUG
@@ -727,6 +739,20 @@ private:
 
     SizeT hash_key(const key_type &key) const noexcept { return hasher_(key); }
 
+    SizeT get_slot_hash(const Slot &slot) const noexcept {
+        if constexpr (k_store_hash) return slot.hash;
+        else return hash_key(slot.kv.first); // for cheap hash
+    }
+
+    void set_slot_hash(Slot &slot, SizeT hash) noexcept {
+        if constexpr (k_store_hash) {
+            slot.hash = hash;
+        } else {
+            (void)slot;
+            (void)hash;
+        }
+    }
+
     // operator[] 专用单次 probing
     // - 若 key 已存在，返回 index，不构造 mapped_type 对象
     // - 若 key 不存在，否则 robin hood 规则插入 {key, mapped_type{}} 并更新 size_
@@ -762,7 +788,7 @@ private:
             Slot &slot_ref = slots_[index];
             if (ctrl_ref == detail::k_empty) {
                 ctrl_ref = cur_ctrl;
-                slot_ref.hash = cur_hash;
+                set_slot_hash(slot_ref, cur_hash);
                 if (!cur_kv) {
                     std::construct_at(std::addressof(slot_ref.kv), std::piecewise_construct,
                                       std::forward_as_tuple(std::forward<K>(key)), std::forward_as_tuple());
@@ -785,7 +811,7 @@ private:
                 }
             }
             // 当前 index kv 信息
-            SizeT existing_hash = slot_ref.hash;
+            SizeT existing_hash = get_slot_hash(slot_ref);
             size_type existing_home = static_cast<size_type>(existing_hash) & mask;
             size_type existing_dist = (index + capacity_ - existing_home) & mask;
             if (existing_dist < dist) {
@@ -796,11 +822,11 @@ private:
                                                std::forward_as_tuple(std::forward<K>(key)), std::forward_as_tuple());
                 }
                 value_type tmp_kv = std::move(slot_ref.kv);
-                SizeT tmp_hash = slot_ref.hash;
+                SizeT tmp_hash = get_slot_hash(slot_ref);
                 control_t tmp_ctrl = ctrl_ref;
 
                 slot_ref.kv = std::move(*cur_kv);
-                slot_ref.hash = cur_hash;
+                set_slot_hash(slot_ref, cur_hash);
                 ctrl_ref = cur_ctrl;
 
                 *cur_kv = std::move(tmp_kv);
@@ -842,7 +868,7 @@ private:
             Slot &slot_ref = slots_[index];
             if (ctrl_ref == detail::k_empty) { // 找到空位直接插入 kv
                 ctrl_ref = cur_ctrl;
-                slot_ref.hash = cur_hash;
+                set_slot_hash(slot_ref, cur_hash);
                 std::construct_at(std::addressof(slot_ref.kv), std::move(cur_kv));
                 ++size_;
 #ifdef DEBUG
@@ -859,18 +885,18 @@ private:
                 }
             }
             // 当前 index kv 信息
-            SizeT existing_hash = slot_ref.hash;
+            SizeT existing_hash = get_slot_hash(slot_ref);
             size_type existing_home = static_cast<size_type>(existing_hash) & mask;
             size_type existing_dist = (index + capacity_ - existing_home) & mask;
             if (existing_dist < dist) {
                 need_check_duplicate = false;
 
                 value_type tmp_kv = std::move(slot_ref.kv);
-                SizeT tmp_hash = slot_ref.hash;
+                SizeT tmp_hash = get_slot_hash(slot_ref);
                 control_t tmp_ctrl = ctrl_ref;
 
                 slot_ref.kv = std::move(cur_kv);
-                slot_ref.hash = cur_hash;
+                set_slot_hash(slot_ref, cur_hash);
                 ctrl_ref = cur_ctrl;
 
                 cur_kv = std::move(tmp_kv);
@@ -923,7 +949,7 @@ private:
             Slot &slot_ref = slots_[index];
             if (ctrl_ref == detail::k_empty) {
                 ctrl_ref = cur_ctrl;
-                slot_ref.hash = cur_hash;
+                set_slot_hash(slot_ref, cur_hash);
                 // 不能 move，可能把用户传入的左值偷走
                 if (!cur_kv) {
                     std::construct_at(std::addressof(slot_ref.kv), std::piecewise_construct,
@@ -951,7 +977,7 @@ private:
                     return {index, false}; // 覆盖
                 }
             }
-            SizeT existing_hash = slot_ref.hash;
+            SizeT existing_hash = get_slot_hash(slot_ref);
             size_type existing_home = static_cast<size_type>(existing_hash) & mask;
             size_type existing_dist = (index + capacity_ - existing_home) & mask;
             if (existing_dist < dist) {
@@ -962,11 +988,11 @@ private:
                                                std::forward_as_tuple(std::forward<M>(mapped)));
                 }
                 value_type tmp_kv = std::move(slot_ref.kv);
-                SizeT tmp_hash = slot_ref.hash;
+                SizeT tmp_hash = get_slot_hash(slot_ref);
                 control_t tmp_ctrl = ctrl_ref;
 
                 slot_ref.kv = std::move(*cur_kv);
-                slot_ref.hash = cur_hash;
+                set_slot_hash(slot_ref, cur_hash);
                 ctrl_ref = cur_ctrl;
 
                 *cur_kv = std::move(tmp_kv);
@@ -1016,7 +1042,7 @@ private:
             control_t &ctrl_ref = controls_[index];
             if (ctrl_ref == detail::k_empty) {
                 ctrl_ref = cur_ctrl;
-                slot_ref.hash = cur_hash;
+                set_slot_hash(slot_ref, cur_hash);
                 if (!cur_kv) {
                     std::construct_at(std::addressof(slots_[index].kv), std::piecewise_construct,
                                       std::forward_as_tuple(std::forward<K>(key)),
@@ -1039,7 +1065,7 @@ private:
                     return {index, false}; // inserted = false
                 }
             }
-            SizeT existing_hash = slot_ref.hash;
+            SizeT existing_hash = get_slot_hash(slot_ref);
             size_type existing_home = static_cast<size_type>(existing_hash) & mask;
             size_type existing_dist = (index + capacity_ - existing_home) & mask;
             if (existing_dist < dist) {
@@ -1050,11 +1076,11 @@ private:
                                                std::forward_as_tuple(std::forward<Args>(args)...));
                 }
                 value_type tmp_kv = std::move(slot_ref.kv);
-                SizeT tmp_hash = slot_ref.hash;
+                SizeT tmp_hash = get_slot_hash(slot_ref);
                 control_t tmp_ctrl = ctrl_ref;
 
                 slot_ref.kv = std::move(*cur_kv);
-                slot_ref.hash = cur_hash;
+                set_slot_hash(slot_ref, cur_hash);
                 ctrl_ref = cur_ctrl;
 
                 *cur_kv = std::move(tmp_kv);
@@ -1103,7 +1129,7 @@ private:
             if (control_byte == detail::k_empty) continue;
             value_type &kv = old_slots[index].kv;
             // SizeT hash_result = hash_key(kv.first); // 注意，需要测试究竟是再算一次更快，还是取 Slot 中值更快
-            SizeT hash_result = old_slots[index].hash;
+            SizeT hash_result = get_slot_hash(old_slots[index]);
             // active slot 下，short hash result = control byte
             size_type insert_index = find_insert_index_for_rehash(hash_result);
             emplace_at_index(insert_index, hash_result, control_byte, std::move(kv.first), std::move(kv.second));
@@ -1184,8 +1210,7 @@ private:
         {
             const control_t *group_ctrl = controls + base_bucket;
             const __m128i ctrl = _mm_loadu_si128(reinterpret_cast<const __m128i *>(group_ctrl));
-            UInt32 group_bits =
-                static_cast<UInt32>(_mm_movemask_epi8(ctrl)); // 收集 16 个控制字节的最高位为一个 bitmask
+            UInt32 group_bits = static_cast<UInt32>(_mm_movemask_epi8(ctrl)); // 收集所有最高位为一个 bitmask
             UInt32 offset_mask = ~UInt32{0} << first_offset;
             UInt32 match_mask = static_cast<UInt32>(_mm_movemask_epi8(_mm_cmpeq_epi8(ctrl, short_hash_target)));
             UInt32 valid_mask = match_mask & offset_mask; // 屏蔽低位 offset 个 buckets
@@ -1228,7 +1253,7 @@ private:
                 size_type index = base_bucket + static_cast<size_type>(bit); // 不用取模，范围一定合法
                 if (equal_(slots[index].kv.first, key)) {
 #ifdef DEBUG
-                    SizeT visited = buckets_visited + (static_cast<SizeT>(bit) - static_cast<SizeT>(first_offset) + 1);
+                    SizeT visited = buckets_visited + static_cast<SizeT>(bit) + 1;
                     record_probe(visited);
 #endif
                     return index;
@@ -1286,7 +1311,7 @@ private:
             // TODO: 如果前后两个 hash 相等，说明 home 一样
             // 此时 existing dist 就是 + 1 关系，不需要从头反推
             // 但是会多出很多分支，所以优先级很低
-            SizeT existing_hash = slots_[index].hash;
+            SizeT existing_hash = get_slot_hash(slots_[index]);
             size_type existing_home = static_cast<size_type>(existing_hash) & mask;
             size_type existing_dist = (index + capacity_ - existing_home) & mask;
             if (existing_dist < dist) {
@@ -1342,7 +1367,7 @@ private:
                           std::piecewise_construct,                    // 分片构造
                           std::forward_as_tuple(std::forward<K>(key)), //
                           std::forward_as_tuple(std::forward<M>(mapped)));
-        slots_[index].hash = hash_result;
+        set_slot_hash(slots_[index], hash_result);
         controls_[index] = short_hash_result;
     }
 
@@ -1356,14 +1381,14 @@ private:
             size_type next = (cur + 1) & mask;
             control_t control_byte = controls_[next];
             if (control_byte == detail::k_empty) break;
-            SizeT next_hash = slots_[next].hash;
+            SizeT next_hash = get_slot_hash(slots_[next]);
             size_type home = static_cast<size_type>(next_hash) & mask;
             size_type dist_from_home = (next + capacity_ - home) & mask;
             // dist from home = 0 说明是 next cluster，不能左移破坏 probing 链
             if (dist_from_home == 0) break; // index 为 next 的 kv 刚好在自己家里
             controls_[cur] = control_byte;
             slots_[cur].kv = std::move(slots_[next].kv);
-            slots_[cur].hash = next_hash;
+            set_slot_hash(slots_[cur], next_hash);
             cur = next;
         }
         std::destroy_at(std::addressof(slots_[cur].kv));

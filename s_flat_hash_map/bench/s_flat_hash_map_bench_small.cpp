@@ -17,7 +17,7 @@ namespace {
 // key 分布
 enum class KeyDistribution : std::uint32_t { kSequential = 0, kRandom = 1, kClustered = 2 };
 
-constexpr std::array<std::size_t, 3> kSizes = {1 << 14, 1 << 18};
+constexpr std::array<std::size_t, 2> kSizes = {1 << 14, 1 << 18};
 constexpr std::array<float, 2> kLoadFactors = {0.75f, 0.875f};
 
 template <class Map> void apply_max_load_factor(Map &map, float max_load_factor) {

@@ -21,6 +21,9 @@ add_compile_options(
     -Wno-unsafe-buffer-usage
     -Wno-padded
     -Wno-newline-eof
+
+    -mavx2
+    -D__AVX2__
 )
 
 # ----------------- include 路径 -----------------
