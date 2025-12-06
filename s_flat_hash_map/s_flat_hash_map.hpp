@@ -6,6 +6,7 @@
 #include <cmath>
 #include <concepts>
 #include <cstddef>
+#include <immintrin.h>
 #include <initializer_list>
 #include <iterator>
 #include <memory>
@@ -556,7 +557,8 @@ public:
         if (!controls_ || size_ == 0) return end();
         SizeT hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
-        size_type index = find(key, hash_result, short_hash_result);
+        // size_type index = robin_hood_find(key, hash_result, short_hash_result);
+        size_type index = simple_find(key, hash_result, short_hash_result);
         if (index == npos) return end();
         return iterator(this, index);
     }
@@ -566,7 +568,8 @@ public:
         if (!controls_ || size_ == 0) return cend();
         SizeT hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
-        size_type index = find(key, hash_result, short_hash_result);
+        // size_type index = robin_hood_find(key, hash_result, short_hash_result);
+        size_type index = simple_find(key, hash_result, short_hash_result);
         if (index == npos) return cend();
         return const_iterator(this, index);
     }
@@ -660,7 +663,8 @@ public:
         if (!controls_ || size_ == 0) return 0;
         SizeT hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
-        size_type index = find(key, hash_result, short_hash_result);
+        // size_type index = robin_hood_find(key, hash_result, short_hash_result);
+        size_type index = simple_find(key, hash_result, short_hash_result);
         if (index == npos) return 0;
         erase_at_index(index);
         return 1;
@@ -744,7 +748,8 @@ private:
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
         // 可能触发扩容，不得不先看 key 是否存在
         if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
-            size_type existing = find(key, hash_result, short_hash_result);
+            // size_type existing = robin_hood_find(key, hash_result, short_hash_result);
+            size_type existing = simple_find(key, hash_result, short_hash_result);
             if (existing != npos) return existing;
             double_storage(); // capacity *= 2
         }
@@ -821,7 +826,8 @@ private:
     std::pair<size_type, bool> find_or_insert_kv(SizeT hash_result, control_t short_hash_result, value_type &&kv) {
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
         if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
-            size_type existing = find(kv.first, hash_result, short_hash_result);
+            // size_type existing = robin_hood_find(kv.first, hash_result, short_hash_result);
+            size_type existing = simple_find(kv.first, hash_result, short_hash_result);
             if (existing != npos) return {existing, false};
             double_storage();
         }
@@ -851,7 +857,7 @@ private:
 #endif
                 return {index, true}; // inserted = true
             }
-            if (control_byte == short_hash_result && need_check_duplicate) { // 指纹匹配，同一 cluster
+            if (control_byte == short_hash_result && need_check_duplicate) {
                 if (equal_(slots_[index].kv.first, cur_kv.first)) {
 #ifdef DEBUG
                     record_probe(probe_len);
@@ -894,7 +900,8 @@ private:
 
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
         if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
-            size_type existing = find(key, hash_result, short_hash_result);
+            // size_type existing = robin_hood_find(key, hash_result, short_hash_result);
+            size_type existing = simple_find(key, hash_result, short_hash_result);
             if (existing != npos) {
                 slots_[existing].kv.second = mapped;
                 return {existing, false};
@@ -977,7 +984,8 @@ private:
                                                    Args &&...args) {
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
         if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
-            size_type existing = find(key, hash_result, short_hash_result);
+            // size_type existing = robin_hood_find(key, hash_result, short_hash_result);
+            size_type existing = simple_find(key, hash_result, short_hash_result);
             if (existing != npos) return {existing, false};
             double_storage();
         }
@@ -1106,14 +1114,45 @@ private:
         move_old_elements(old_controls, old_slots, old_capacity);
     }
 
+    // 提供哈希值和控制字节，返回 key 的 index，不存在则返回 npos，不利用早停机制
+    // benchmark 显示 u32 场景下提速百分之八以上
+    size_type simple_find(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
+        if (capacity_ == 0) return npos;
+        size_type mask = capacity_ - 1;
+        size_type index = static_cast<size_type>(hash_result) & mask;
+#ifdef DEBUG
+        SizeT probe_len = 0;
+#endif
+        for (;;) {
+#ifdef DEBUG
+            ++probe_len;
+#endif
+            control_t control_byte = controls_[index];
+            if (control_byte == detail::k_empty) {
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return npos;
+            }
+            if (control_byte == short_hash_result && equal_(slots_[index].kv.first, key)) {
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return index;
+            }
+            index = (index + 1) & mask;
+        }
+        return npos;
+    }
+
     // 提供哈希值和控制字节，返回 key 的 index，不存在则返回 npos
-    size_type find(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
+    size_type robin_hood_find(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
         // 除了仅找 key 是否存在的环节别用，节省性能
         if (capacity_ == 0) return npos;
         size_type mask = capacity_ - 1;
         size_type home = static_cast<size_type>(hash_result) & mask; // 探测起点
         size_type index = home;
-        size_type dist = 0; // 当前查找 key 相对自己 home 的探测距离
+        size_type dist = 0; // 当前正在处理的 key 相对自己 home 的探测距离
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
@@ -1128,6 +1167,15 @@ private:
 #endif
                 return npos; // EMPTY = 没找到
             }
+            if (control_byte == short_hash_result && equal_(slots_[index].kv.first, key)) {
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return index;
+            }
+            // TODO: 如果前后两个 hash 相等，说明 home 一样
+            // 此时 existing dist 就是 + 1 关系，不需要从头反推
+            // 但是会多出很多分支，所以优先级很低
             SizeT existing_hash = slots_[index].hash;
             size_type existing_home = static_cast<size_type>(existing_hash) & mask;
             size_type existing_dist = (index + capacity_ - existing_home) & mask;
@@ -1136,14 +1184,6 @@ private:
                 record_probe(probe_len);
 #endif
                 return npos;
-            }
-            if (control_byte == short_hash_result) {
-                if (equal_(slots_[index].kv.first, key)) {
-#ifdef DEBUG
-                    record_probe(probe_len);
-#endif
-                    return index;
-                }
             }
             index = (index + 1) & mask; // 避免模运算，自动回滚到起点
             ++dist;
@@ -1230,6 +1270,7 @@ private:
             control_t control_byte = lhs.controls_[index];
             if (control_byte == detail::k_empty) continue;
             const value_type &kv = lhs.slots_[index].kv;
+            // auto it = rhs.robin_hood_find(kv.first);
             auto it = rhs.find(kv.first);
             if (it == rhs.end()) return false;            // 对面没有这个键
             if (!(it->second == kv.second)) return false; // 两个键 value 不等
