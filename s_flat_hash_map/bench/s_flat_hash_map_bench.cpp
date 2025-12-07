@@ -126,11 +126,9 @@ struct DebugCounters {
                 max_probe_len_ = static_cast<std::size_t>(stats.max_probe_len);
             }
             total_rehash_ += static_cast<double>(stats.rehash_count);
-            total_cleanup_rehash_ += static_cast<double>(stats.cleanup_rehash_count);
             total_double_rehash_ += static_cast<double>(stats.double_rehash_count);
             total_size_ += static_cast<double>(stats.size);
             total_capacity_ += static_cast<double>(stats.capacity);
-            total_deleted_ += static_cast<double>(stats.deleted);
             ++samples_;
         }
 #else
@@ -147,11 +145,9 @@ struct DebugCounters {
         state.counters["probe_avg"] = total_avg_probe_ * inv;
         state.counters["probe_max"] = static_cast<double>(max_probe_len_);
         state.counters["rehash"] = total_rehash_ * inv;
-        state.counters["cleanup_rehash"] = total_cleanup_rehash_ * inv;
         state.counters["double_rehash"] = total_double_rehash_ * inv;
         state.counters["size"] = total_size_ * inv;
         state.counters["capacity"] = total_capacity_ * inv;
-        state.counters["deleted"] = total_deleted_ * inv;
 #else
         (void)label;
 #endif
@@ -162,11 +158,9 @@ private:
     double total_avg_probe_ = 0.0;
     std::size_t max_probe_len_ = 0;
     double total_rehash_ = 0.0;
-    double total_cleanup_rehash_ = 0.0;
     double total_double_rehash_ = 0.0;
     double total_size_ = 0.0;
     double total_capacity_ = 0.0;
-    double total_deleted_ = 0.0;
     std::size_t samples_ = 0;
 #endif
 };
@@ -514,22 +508,20 @@ template <class Map> void register_string_family(const std::string &prefix) {
     for (float load_factor : kLoadFactors) {
         const std::string suffix = suffix_for("short", load_factor);
 
-        auto *insert = benchmark::RegisterBenchmark(
-            (prefix + "_insert_" + suffix).c_str(), [load_factor](benchmark::State &st) {
+        auto *insert =
+            benchmark::RegisterBenchmark((prefix + "_insert_" + suffix).c_str(), [load_factor](benchmark::State &st) {
                 BM_StringInsert<Map>(st, load_factor);
             });
-        auto *find_hit = benchmark::RegisterBenchmark(
-            (prefix + "_find_hit_" + suffix).c_str(), [load_factor](benchmark::State &st) {
+        auto *find_hit =
+            benchmark::RegisterBenchmark((prefix + "_find_hit_" + suffix).c_str(), [load_factor](benchmark::State &st) {
                 BM_StringFindHit<Map>(st, load_factor);
             });
         auto *find_miss = benchmark::RegisterBenchmark(
-            (prefix + "_find_miss_" + suffix).c_str(), [load_factor](benchmark::State &st) {
-                BM_StringFindMiss<Map>(st, load_factor);
-            });
+            (prefix + "_find_miss_" + suffix).c_str(),
+            [load_factor](benchmark::State &st) { BM_StringFindMiss<Map>(st, load_factor); });
         auto *erase_insert = benchmark::RegisterBenchmark(
-            (prefix + "_erase_half_insert_half_" + suffix).c_str(), [load_factor](benchmark::State &st) {
-                BM_StringEraseHalfInsertHalf<Map>(st, load_factor);
-            });
+            (prefix + "_erase_half_insert_half_" + suffix).c_str(),
+            [load_factor](benchmark::State &st) { BM_StringEraseHalfInsertHalf<Map>(st, load_factor); });
 
         for (auto size : kSizes) {
             insert->Arg(static_cast<std::int64_t>(size));

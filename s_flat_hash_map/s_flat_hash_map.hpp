@@ -14,10 +14,12 @@
 #include <iterator>
 #include <memory>
 #include <mmintrin.h>
+#include <new>
 #include <stdexcept>
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <vcruntime_new_debug.h>
 
 // #define DEBUG
 
@@ -34,8 +36,8 @@ inline constexpr control_t k_empty = static_cast<control_t>(-128); // 0x80 EMPTY
 // inline constexpr control_t k_deleted = static_cast<control_t>(-2); // 0xFE DELETED [[deprecated]]
 inline constexpr control_t k_sentinel = static_cast<control_t>(-1); // 0xFF SENTINAL
 inline constexpr SizeT k_min_capacity = 8;                          // 逻辑允许最大元素数量 = capacity * max load factor
-inline constexpr float k_default_max_load_factor = 0.875f;          // 7/8 减少 Group 全 FULL 的概率 (7%)
-inline constexpr int k_group_width = 16;                            // 一组 16 个 control_t
+inline constexpr float k_default_max_load_factor = 0.75f;
+inline constexpr int k_group_width = 16; // 一组 16 个 control_t
 
 // 数值是否为 2 的次幂
 inline constexpr bool is_power_of_two(SizeT x) noexcept { return x && ((x & (x - 1)) == 0); }
@@ -56,7 +58,7 @@ inline constexpr SizeT next_power_of_two(SizeT x) noexcept {
 // 7-bit hash 指纹
 inline constexpr control_t short_hash(SizeT h) noexcept {
     // note: h >> 7 是个可调参数，只要 >=7，不要取低位即可
-    UInt8 v = static_cast<UInt8>((h >> 7) & 0x7Fu); // 0x7F = 0111 1111
+    UInt8 v = static_cast<UInt8>((h >> 8) & 0x7Fu); // 0x7F = 0111 1111
     return static_cast<control_t>(v);
 }
 
@@ -129,7 +131,6 @@ private:
     struct debug_stats {
         size_type size;
         size_type capacity;
-        size_type deleted;
         SizeT rehash_count;
         SizeT double_rehash_count;
         SizeT max_probe_len;
@@ -325,6 +326,7 @@ public:
         other.controls_ = nullptr;
         other.slots_ = nullptr;
         other.capacity_ = 0;
+        other.bucket_mask_ = 0;
         other.size_ = 0;
 #ifdef DEBUG
         other.total_probes_ = 0;
@@ -352,6 +354,7 @@ public:
         controls_ = other.controls_;
         slots_ = other.slots_;
         capacity_ = other.capacity_;
+        bucket_mask_ = other.bucket_mask_;
         size_ = other.size_;
         max_load_factor_ = other.max_load_factor_;
 #ifdef DEBUG
@@ -365,6 +368,7 @@ public:
         other.controls_ = nullptr;
         other.slots_ = nullptr;
         other.capacity_ = 0;
+        other.bucket_mask_ = 0;
         other.size_ = 0;
 #ifdef DEBUG
         other.total_probes_ = 0;
@@ -427,6 +431,7 @@ public:
             controls_ = nullptr;
             slots_ = nullptr;
             capacity_ = 0;
+            bucket_mask_ = 0;
             return;
         }
         // 有活跃元素
@@ -456,7 +461,6 @@ public:
 
         swap(hasher_, other.hasher_);
         swap(equal_, other.equal_);
-        swap(control_alloc_, other.control_alloc_);
         swap(controls_, other.controls_);
         swap(slots_, other.slots_);
         swap(capacity_, other.capacity_);
@@ -494,6 +498,7 @@ public:
                 controls_ = nullptr;
                 slots_ = nullptr;
                 capacity_ = 0;
+                bucket_mask_ = 0;
 #ifdef DEBUG
                 ++rehash_count_;
 #endif
@@ -556,22 +561,33 @@ public:
     iterator find(const key_type &key) noexcept {
         if (!controls_ || size_ == 0) return end();
         SizeT hash_result = hash_key(key);
-        control_t short_hash_result = detail::short_hash(hash_result);
-        // size_type index = robin_hood_find(key, hash_result, short_hash_result);
-        size_type index = simple_find(key, hash_result, short_hash_result);
-        if (index == npos) return end();
-        return iterator(this, index);
+        if constexpr (k_small_int_key) {
+            size_type index = simple_find_int(key, hash_result);
+            if (index == npos) return end();
+            return iterator(this, index);
+        } else {
+            control_t short_hash_result = detail::short_hash(hash_result);
+            // size_type index = robin_hood_find(key, hash_result, short_hash_result);
+            size_type index = simple_find(key, hash_result, short_hash_result);
+            if (index == npos) return end();
+            return iterator(this, index);
+        }
     }
 
     // 返回指向给定键值对的迭代器
     const_iterator find(const key_type &key) const noexcept {
         if (!controls_ || size_ == 0) return cend();
         SizeT hash_result = hash_key(key);
-        control_t short_hash_result = detail::short_hash(hash_result);
-        // size_type index = robin_hood_find(key, hash_result, short_hash_result);
-        size_type index = simple_find(key, hash_result, short_hash_result);
-        if (index == npos) return cend();
-        return const_iterator(this, index);
+        if constexpr (k_small_int_key) {
+            size_type index = simple_find_int(key, hash_result);
+            if (index == npos) return cend();
+            return const_iterator(this, index);
+        } else {
+            control_t short_hash_result = detail::short_hash(hash_result);
+            size_type index = simple_find(key, hash_result, short_hash_result);
+            if (index == npos) return cend();
+            return const_iterator(this, index);
+        }
     }
 
     bool contains(const key_type &key) const noexcept { return find(key) != end(); }
@@ -662,9 +678,13 @@ public:
     size_type erase(const key_type &key) {
         if (!controls_ || size_ == 0) return 0;
         SizeT hash_result = hash_key(key);
-        control_t short_hash_result = detail::short_hash(hash_result);
-        // size_type index = robin_hood_find(key, hash_result, short_hash_result);
-        size_type index = simple_find(key, hash_result, short_hash_result);
+        size_type index;
+        if constexpr (k_small_int_key) {
+            index = simple_find_int(key, hash_result);
+        } else {
+            control_t short_hash_result = detail::short_hash(hash_result);
+            index = simple_find(key, hash_result, short_hash_result);
+        }
         if (index == npos) return 0;
         erase_at_index(index);
         return 1;
@@ -708,6 +728,10 @@ public:
 private:
     static constexpr size_type npos = static_cast<size_type>(-1);
 
+    // 小整型支持
+    static constexpr bool k_small_int_key =
+        std::is_integral_v<key_type> && (sizeof(key_type) == 4 || sizeof(key_type) == 8);
+
     hasher_type hasher_{};
     key_equal_type equal_{};
     allocator_type alloc_{};
@@ -716,12 +740,12 @@ private:
     control_t *controls_ = nullptr;
     Slot *slots_ = nullptr;
     size_type capacity_ = 0;
+    size_type bucket_mask_ = 0;
     size_type size_ = 0;
     // size_type deleted_ = 0;
     float max_load_factor_ = detail::k_default_max_load_factor;
 
-    using control_allocator_type = std::allocator<control_t>; // 确定由 std::allocator 来，不用 traits 包装
-    control_allocator_type control_alloc_{};
+    static constexpr std::align_val_t k_ctrl_align = std::align_val_t{16}; // controls 数组 16 字节对齐
 
 #ifdef DEBUG
     mutable SizeT total_probes_ = 0;        // 探测总长度
@@ -767,8 +791,7 @@ private:
             if (existing != npos) return existing;
             double_storage(); // capacity *= 2
         }
-        size_type mask = capacity_ - 1;
-        size_type index = static_cast<size_type>(hash_result) & mask;
+        size_type index = static_cast<size_type>(hash_result) & bucket_mask_;
         size_type dist = 0;
 
         alignas(value_type) UChar cur_kv_storage[sizeof(value_type)];
@@ -812,8 +835,8 @@ private:
             }
             // 当前 index kv 信息
             SizeT existing_hash = get_slot_hash(slot_ref);
-            size_type existing_home = static_cast<size_type>(existing_hash) & mask;
-            size_type existing_dist = (index + capacity_ - existing_home) & mask;
+            size_type existing_home = static_cast<size_type>(existing_hash) & bucket_mask_;
+            size_type existing_dist = (index + capacity_ - existing_home) & bucket_mask_;
             if (existing_dist < dist) {
                 // 进入这里，说明原始 key 不再表中，后续不必查重
                 need_check_duplicate = false;
@@ -834,7 +857,7 @@ private:
                 cur_ctrl = tmp_ctrl;
                 dist = existing_dist;
             }
-            index = (index + 1) & mask;
+            index = (index + 1) & bucket_mask_;
             ++dist;
         }
         throw;
@@ -850,8 +873,7 @@ private:
             double_storage();
         }
 
-        size_type mask = capacity_ - 1;
-        size_type index = static_cast<size_type>(hash_result) & mask;
+        size_type index = static_cast<size_type>(hash_result) & bucket_mask_;
         size_type dist = 0;
         value_type cur_kv = std::move(kv);
         SizeT cur_hash = hash_result;
@@ -886,8 +908,8 @@ private:
             }
             // 当前 index kv 信息
             SizeT existing_hash = get_slot_hash(slot_ref);
-            size_type existing_home = static_cast<size_type>(existing_hash) & mask;
-            size_type existing_dist = (index + capacity_ - existing_home) & mask;
+            size_type existing_home = static_cast<size_type>(existing_hash) & bucket_mask_;
+            size_type existing_dist = (index + capacity_ - existing_home) & bucket_mask_;
             if (existing_dist < dist) {
                 need_check_duplicate = false;
 
@@ -904,7 +926,7 @@ private:
                 cur_ctrl = tmp_ctrl;
                 dist = existing_dist;
             }
-            index = (index + 1) & mask;
+            index = (index + 1) & bucket_mask_;
             ++dist;
         }
         throw;
@@ -928,8 +950,7 @@ private:
             double_storage();
         }
 
-        size_type mask = capacity_ - 1;
-        size_type index = static_cast<size_type>(hash_result) & mask;
+        size_type index = static_cast<size_type>(hash_result) & bucket_mask_;
         size_type dist = 0;
 
         alignas(value_type) unsigned char cur_kv_storage[sizeof(value_type)];
@@ -978,8 +999,8 @@ private:
                 }
             }
             SizeT existing_hash = get_slot_hash(slot_ref);
-            size_type existing_home = static_cast<size_type>(existing_hash) & mask;
-            size_type existing_dist = (index + capacity_ - existing_home) & mask;
+            size_type existing_home = static_cast<size_type>(existing_hash) & bucket_mask_;
+            size_type existing_dist = (index + capacity_ - existing_home) & bucket_mask_;
             if (existing_dist < dist) {
                 need_check_duplicate = false;
                 if (!cur_kv) {
@@ -1000,7 +1021,7 @@ private:
                 cur_ctrl = tmp_ctrl;
                 dist = existing_dist;
             }
-            index = (index + 1) & mask;
+            index = (index + 1) & bucket_mask_;
             ++dist;
         }
         throw;
@@ -1021,8 +1042,7 @@ private:
             double_storage();
         }
 
-        size_type mask = capacity_ - 1;
-        size_type index = static_cast<size_type>(hash_result) & mask;
+        size_type index = static_cast<size_type>(hash_result) & bucket_mask_;
         size_type dist = 0;
 
         alignas(value_type) unsigned char cur_kv_storage[sizeof(value_type)];
@@ -1066,8 +1086,8 @@ private:
                 }
             }
             SizeT existing_hash = get_slot_hash(slot_ref);
-            size_type existing_home = static_cast<size_type>(existing_hash) & mask;
-            size_type existing_dist = (index + capacity_ - existing_home) & mask;
+            size_type existing_home = static_cast<size_type>(existing_hash) & bucket_mask_;
+            size_type existing_dist = (index + capacity_ - existing_home) & bucket_mask_;
             if (existing_dist < dist) {
                 need_check_duplicate = false;
                 if (!cur_kv) {
@@ -1088,7 +1108,7 @@ private:
                 cur_ctrl = tmp_ctrl;
                 dist = existing_dist;
             }
-            index = (index + 1) & mask;
+            index = (index + 1) & bucket_mask_;
             ++dist;
         }
         throw;
@@ -1096,9 +1116,11 @@ private:
 
     // 仅开空间，更新 capacity_，新地方全设为 empty，尾部填充 sentinel
     void allocate_storage(size_type capacity) {
-        controls_ = control_alloc_.allocate(capacity + detail::k_group_width);
+        controls_ = static_cast<control_t *>(
+            ::operator new(sizeof(control_t) * (capacity + detail::k_group_width), k_ctrl_align));
         slots_ = slot_alloc_traits::allocate(slot_alloc_, capacity);
         capacity_ = capacity;
+        bucket_mask_ = capacity_ - 1;
         // 初始化为全 EMPTY
         for (size_type index = 0; index < capacity_; ++index) { controls_[index] = detail::k_empty; }
         // 尾部 k group width 个位置填充哨兵值，确保任意起点加载 k group width 字节都不会越界
@@ -1109,7 +1131,7 @@ private:
 
     // 仅释放空间，不重置任何成员，保证 capacity > 0 再调用
     void deallocate_storage() noexcept {
-        control_alloc_.deallocate(controls_, capacity_ + detail::k_group_width);
+        ::operator delete[](controls_, k_ctrl_align);
         slot_alloc_traits::deallocate(slot_alloc_, slots_, capacity_);
     }
 
@@ -1135,7 +1157,7 @@ private:
             emplace_at_index(insert_index, hash_result, control_byte, std::move(kv.first), std::move(kv.second));
             std::destroy_at(std::addressof(kv)); // 调用析构函数
         }
-        control_alloc_.deallocate(old_controls, old_capacity + detail::k_group_width);
+        ::operator delete[](old_controls, k_ctrl_align);
         slot_alloc_traits::deallocate(slot_alloc_, old_slots, old_capacity);
     }
 
@@ -1154,10 +1176,42 @@ private:
         move_old_elements(old_controls, old_slots, old_capacity);
     }
 
+    // u32 / u64 等小整型 key 专用查找路径：
+    // 不用 short hash，不用 SIMD，只做线性探测 + 直接 key 比较
+    // 利用 robin hood 性质做 early exit 优化未命中
+    size_type simple_find_int(const key_type &key, SizeT hash_result) const noexcept {
+        if (capacity_ == 0) return npos;
+        size_type index = static_cast<size_type>(hash_result) & bucket_mask_;
+#ifdef DEBUG
+        SizeT probe_len = 0;
+#endif
+        for (;;) {
+#ifdef DEBUG
+            ++probe_len;
+#endif
+            control_t control_byte = controls_[index];
+            // EMPTY：不存在
+            if (control_byte == detail::k_empty) {
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return npos;
+            }
+            // 命中 key，直接返回
+            if (equal_(slots_[index].kv.first, key)) {
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return index;
+            }
+            index = (index + 1) & bucket_mask_;
+        }
+        return npos;
+    }
+
     // 小表，不走 SIMD
     size_type simple_find_small(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
-        size_type mask = capacity_ - 1;
-        size_type index = static_cast<size_type>(hash_result) & mask;
+        size_type index = static_cast<size_type>(hash_result) & bucket_mask_;
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
@@ -1178,25 +1232,20 @@ private:
 #endif
                 return index;
             }
-            index = (index + 1) & mask;
+            index = (index + 1) & bucket_mask_;
         }
         return npos;
     }
 
     // 提供哈希值和控制字节，返回 key 的 index，不存在则返回 npos，不利用早停机制
+    // 还没 umap 一半快，而且 avx2，early exist 等手段全部负收益
     size_type simple_find(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
         if (capacity_ == 0) return npos;
 
         // capacity < 64 暴力线性扫描
         if (capacity_ < 64) return simple_find_small(key, hash_result, short_hash_result);
 
-        // 缓存指针
-        auto *controls = controls_;
-        auto *slots = slots_;
-
-        // capacity >= group width 且为 2 的次幂
-        size_type bucket_mask = capacity_ - 1;
-        size_type home_bucket = static_cast<size_type>(hash_result) & bucket_mask; // 探测起点
+        size_type home_bucket = static_cast<size_type>(hash_result) & bucket_mask_; // 探测起点
         size_type first_offset =
             home_bucket & (static_cast<size_type>(detail::k_group_width) - 1); // 起点相对组头位置偏移
         size_type base_bucket = home_bucket - first_offset;                    // 起点组头索引
@@ -1208,8 +1257,8 @@ private:
 #endif
         // circle 1
         {
-            const control_t *group_ctrl = controls + base_bucket;
-            const __m128i ctrl = _mm_loadu_si128(reinterpret_cast<const __m128i *>(group_ctrl));
+            const control_t *group_ctrl = controls_ + base_bucket;
+            const __m128i ctrl = _mm_load_si128(reinterpret_cast<const __m128i *>(group_ctrl));
             UInt32 group_bits = static_cast<UInt32>(_mm_movemask_epi8(ctrl)); // 收集所有最高位为一个 bitmask
             UInt32 offset_mask = ~UInt32{0} << first_offset;
             UInt32 match_mask = static_cast<UInt32>(_mm_movemask_epi8(_mm_cmpeq_epi8(ctrl, short_hash_target)));
@@ -1217,7 +1266,7 @@ private:
             while (valid_mask) {
                 unsigned bit = static_cast<unsigned>(std::countr_zero(valid_mask)); // 第一个指纹匹配的位置
                 size_type index = base_bucket + static_cast<size_type>(bit);
-                if (equal_(slots[index].kv.first, key)) {
+                if (equal_(slots_[index].kv.first, key)) {
 #ifdef DEBUG
                     SizeT visited = buckets_visited + (static_cast<SizeT>(bit) - static_cast<SizeT>(first_offset) + 1);
                     record_probe(visited);
@@ -1242,16 +1291,16 @@ private:
 #endif
         // 后续组别
         for (;;) {
-            base_bucket = (base_bucket + static_cast<size_type>(detail::k_group_width)) & bucket_mask; // 组头下标
-            const control_t *group_ctrl = controls + base_bucket;                                      // 指向组头的指针
-            const __m128i ctrl = _mm_loadu_si128(reinterpret_cast<const __m128i *>(group_ctrl));
+            base_bucket = (base_bucket + static_cast<size_type>(detail::k_group_width)) & bucket_mask_; // 组头下标
+            const control_t *group_ctrl = controls_ + base_bucket; // 指向组头的指针
+            const __m128i ctrl = _mm_load_si128(reinterpret_cast<const __m128i *>(group_ctrl));
             UInt32 group_bits = static_cast<UInt32>(_mm_movemask_epi8(ctrl));
             UInt32 match_mask = static_cast<UInt32>(_mm_movemask_epi8(_mm_cmpeq_epi8(ctrl, short_hash_target)));
             while (match_mask) { // 有任一指纹匹配
                 // 低位有多少连续 0，相当于第一个匹配的位置，unsigned 与 countr_zero 搭配
                 unsigned bit = static_cast<unsigned>(std::countr_zero(match_mask));
                 size_type index = base_bucket + static_cast<size_type>(bit); // 不用取模，范围一定合法
-                if (equal_(slots[index].kv.first, key)) {
+                if (equal_(slots_[index].kv.first, key)) {
 #ifdef DEBUG
                     SizeT visited = buckets_visited + static_cast<SizeT>(bit) + 1;
                     record_probe(visited);
@@ -1284,8 +1333,7 @@ private:
     size_type robin_hood_find(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
         // 除了仅找 key 是否存在的环节别用，节省性能
         if (capacity_ == 0) return npos;
-        size_type mask = capacity_ - 1;
-        size_type home = static_cast<size_type>(hash_result) & mask; // 探测起点
+        size_type home = static_cast<size_type>(hash_result) & bucket_mask_; // 探测起点
         size_type index = home;
         size_type dist = 0; // 当前正在处理的 key 相对自己 home 的探测距离
 #ifdef DEBUG
@@ -1312,15 +1360,15 @@ private:
             // 此时 existing dist 就是 + 1 关系，不需要从头反推
             // 但是会多出很多分支，所以优先级很低
             SizeT existing_hash = get_slot_hash(slots_[index]);
-            size_type existing_home = static_cast<size_type>(existing_hash) & mask;
-            size_type existing_dist = (index + capacity_ - existing_home) & mask;
+            size_type existing_home = static_cast<size_type>(existing_hash) & bucket_mask_;
+            size_type existing_dist = (index + capacity_ - existing_home) & bucket_mask_;
             if (existing_dist < dist) {
 #ifdef DEBUG
                 record_probe(probe_len);
 #endif
                 return npos;
             }
-            index = (index + 1) & mask; // 避免模运算，自动回滚到起点
+            index = (index + 1) & bucket_mask_; // 避免模运算，自动回滚到起点
             ++dist;
 #ifdef DEBUG
             // 不可能到达这里
@@ -1337,9 +1385,7 @@ private:
     // 不会破坏 robin hood probing 探测链，由于不再有墓碑，每个 cluster 都是多个 FULL 紧挨在一起
     // 具体来讲，线性搬迁确保每个元素都在它 home 的右手边，也不会让多个 cluster 混一起，因此安全
     size_type find_insert_index_for_rehash(SizeT hash_result) {
-        // 暂时不需要 short hash result，别乱传
-        size_type mask = capacity_ - 1;
-        size_type index = static_cast<size_type>(hash_result) & mask;
+        size_type index = static_cast<size_type>(hash_result) & bucket_mask_;
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
@@ -1354,7 +1400,7 @@ private:
 #endif
                 return index;
             }
-            index = (index + 1) & mask;
+            index = (index + 1) & bucket_mask_;
         }
         throw std::logic_error("flat_hash_map::rehash: no empty slot found");
     }
@@ -1374,16 +1420,15 @@ private:
     // 调用 index 处 kv 析构，标记为墓碑，更新 size_ 和 deleted_，无 rehash 行为
     void erase_at_index(size_type index) noexcept {
         // 逻辑：删完后当前 cluster 剩余元素左移一格，遇到 empty 或者新 cluster 停止
-        size_type mask = capacity_ - 1;
         size_type cur = index;
 
         for (;;) {
-            size_type next = (cur + 1) & mask;
+            size_type next = (cur + 1) & bucket_mask_;
             control_t control_byte = controls_[next];
             if (control_byte == detail::k_empty) break;
             SizeT next_hash = get_slot_hash(slots_[next]);
-            size_type home = static_cast<size_type>(next_hash) & mask;
-            size_type dist_from_home = (next + capacity_ - home) & mask;
+            size_type home = static_cast<size_type>(next_hash) & bucket_mask_;
+            size_type dist_from_home = (next + capacity_ - home) & bucket_mask_;
             // dist from home = 0 说明是 next cluster，不能左移破坏 probing 链
             if (dist_from_home == 0) break; // index 为 next 的 kv 刚好在自己家里
             controls_[cur] = control_byte;
