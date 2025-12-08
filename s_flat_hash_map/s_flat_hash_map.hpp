@@ -2309,7 +2309,7 @@ private:
 
 // 尝试不用 pair，优化 cacheline
 template <typename MappedType, typename HasherType = detail::FastUInt32Hash,
-          typename Alloc = std::allocator<std::pair<UInt32, MappedType>>>
+          typename Alloc = std::allocator<std::pair<UInt32, MappedType>>> // TODO：Alloc 的默认参数可能需要更换
 class flat_hash_map_u32_soa {
 public:
     using key_type = UInt32;
@@ -2861,9 +2861,13 @@ private:
 
     SizeT hash_key(const key_type &key) const noexcept { return hasher_(key); }
 
+    // 如果要 find hit 快，先判断是否等于 key 再判是否为未占用
+    // 如果要 find miss 快，则反过来
+    // 当前这个版本，对于 find hit 最为友好，谨慎调整
     size_type get_key_index(const key_type &key) const noexcept {
         if (capacity_ == 0) return npos;
         size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
+        // 注意，乐观预测很可能是不必要的，会让编译器觉得这是小聪明，且降低分支预测成功率
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
@@ -2871,18 +2875,18 @@ private:
 #ifdef DEBUG
             ++probe_len;
 #endif
-            key_type stored_key = slots_[index].key;
-            if (stored_key == k_unoccupied) {
-#ifdef DEBUG
-                record_probe(probe_len);
-#endif
-                return npos;
-            }
-            if (stored_key == key) {
+            key_type stored = slots_[index].key;
+            if (stored == key) {
 #ifdef DEBUG
                 record_probe(probe_len);
 #endif
                 return index;
+            }
+            if (stored == k_unoccupied) {
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return npos;
             }
             index = (index + 1) & bucket_mask_;
         }
