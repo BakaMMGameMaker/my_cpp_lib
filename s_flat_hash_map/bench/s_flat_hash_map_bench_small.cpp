@@ -541,12 +541,12 @@ template <class Map> void register_string_family(const std::string &prefix) {
 
 void register_all_benchmarks() {
     // 整数：只测 u32 随机分布，std vs flat
-    register_int_family<std_umap_u32, std::uint32_t>("std_umap_u32");
+    // register_int_family<std_umap_u32, std::uint32_t>("std_umap_u32");
     register_int_family<flat_map_u32, std::uint32_t>("flat_map_u32");
 
     // 短字符串：只测 std::string vs flat_map<std::string_view>
-    register_string_family<std_umap_string>("std_umap_string");
-    register_string_family<flat_map_sview>("flat_map_sview");
+    // register_string_family<std_umap_string>("std_umap_string");
+    // register_string_family<flat_map_sview>("flat_map_sview");
 }
 
 const bool registered = [] {

@@ -67,7 +67,10 @@ target_compile_definitions(s_flat_hash_map_bench_small PRIVATE BENCHMARK_STATIC_
 target_compile_options(s_flat_hash_map_bench_small PRIVATE
     -Wno-used-but-marked-unused
     -Wno-switch-default
+    -Wno-unneeded-internal-declaration
+    -Wno-unused-template
 )
+
 
 target_link_libraries(s_flat_hash_map_bench_small PRIVATE
     benchmark

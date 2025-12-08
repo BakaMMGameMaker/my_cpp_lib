@@ -2592,6 +2592,7 @@ public:
         if (load_factor < 0.50f) load_factor = 0.50f;
         if (load_factor > 0.95f) load_factor = 0.95f;
         max_load_factor_ = load_factor;
+        growth_limit_ = static_cast<size_type>(max_load_factor_ * static_cast<float>(capacity_));
     }
 
     void clear() noexcept {
@@ -2620,6 +2621,7 @@ public:
             values_ = nullptr;
             capacity_ = 0;
             bucket_mask_ = 0;
+            growth_limit_ = 0;
             return;
         }
         size_type new_capacity = static_cast<size_type>(std::ceil(static_cast<float>(size_) / max_load_factor_));
@@ -2843,6 +2845,7 @@ private:
     size_type capacity_ = 0;
     size_type bucket_mask_ = 0;
     size_type size_ = 0;
+    size_type growth_limit_ = 0;
     float max_load_factor_ = detail::k_default_max_load_factor;
 
 #ifdef DEBUG
@@ -2894,7 +2897,7 @@ private:
 
     size_type find_or_insert_default(const key_type &key) {
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
-        if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
+        if (size_ >= growth_limit_) { // 临界元素
             size_type existing = get_key_index(key);
             if (existing != npos) return existing;
             double_storage();
@@ -2933,7 +2936,7 @@ private:
         requires(std::constructible_from<mapped_type, M>)
     std::pair<size_type, bool> find_or_insert_kv(const key_type &key, M &&mapped) {
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
-        if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
+        if (size_ >= growth_limit_) {
             size_type existing = get_key_index(key);
             if (existing != npos) return {existing, false};
             double_storage();
@@ -2972,7 +2975,7 @@ private:
         requires(std::constructible_from<mapped_type, M>)
     std::pair<size_type, bool> find_and_insert_or_assign(const key_type &key, M &&mapped) {
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
-        if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
+        if (size_ >= growth_limit_) {
             size_type existing = get_key_index(key);
             if (existing != npos) {
                 values_[existing].second = std::forward<M>(mapped);
@@ -3015,7 +3018,7 @@ private:
         requires(std::constructible_from<mapped_type, Args...>)
     std::pair<size_type, bool> find_or_try_emplace(const key_type &key, Args &&...args) {
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
-        if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
+        if (size_ >= growth_limit_) {
             size_type existing = get_key_index(key);
             if (existing != npos) return {existing, false};
             double_storage();
@@ -3055,6 +3058,7 @@ private:
         values_ = value_alloc_traits::allocate(value_alloc_, capacity);
         capacity_ = capacity;
         bucket_mask_ = capacity_ - 1;
+        growth_limit_ = static_cast<size_type>(max_load_factor_ * static_cast<float>(capacity_));
 
         for (size_type index = 0; index < capacity_; ++index) {
             std::construct_at(slots_ + index); // 默认 key = k empty key
