@@ -139,6 +139,8 @@ static void test_basic_operations() {
     m.rehash(0);
     assert(m.size() == 0);
     assert(m.capacity() == 0);
+    m.reserve(1);
+    assert(m.capacity() == 8);
 
     // try_emplace
     auto [te_it1, te_inserted1] = m.try_emplace(5u, 555u);
@@ -183,7 +185,8 @@ static void test_basic_operations_u32_soa() {
     map_t m;
     assert(m.empty()); // 初始建表为空
     assert(m.size() == 0);
-    assert(m.capacity() == 0); // 延迟分配
+    // assert(m.capacity() == 0); // 延迟分配
+    assert(m.capacity() == 8); // 直接分配 8
 
     // insert / find
     auto [it1, inserted1] = m.emplace(1u, 10u);
@@ -265,6 +268,8 @@ static void test_basic_operations_u32_soa() {
     m.rehash(0);
     assert(m.size() == 0);
     assert(m.capacity() == 0);
+    m.reserve(1);
+    assert(m.capacity() == 8);
 
     // try_emplace
     auto [te_it1, te_inserted1] = m.try_emplace(5u, 555u);
@@ -291,7 +296,7 @@ static void test_basic_operations_u32_soa() {
     {
         map_t m2;
         m2.max_load_factor(0.5);
-        assert(m2.capacity() == 0);
+        assert(m2.capacity() == 8);
         m2.try_emplace(10u, 10u);
         assert(m2.capacity() == 8);
         assert(m2.size() == 1);
@@ -382,6 +387,8 @@ static void test_shrink_to_fit_u32_soa() {
     m.shrink_to_fit();
     assert(m.size() == 0);
     assert(m.capacity() == 0);
+    m.reserve(8);
+    assert(m.capacity() == 16);
 
     map_t m2;
     m2.max_load_factor(0.5f);
@@ -661,23 +668,24 @@ static void test_allocator_behavior_u32_soa() {
 
     AllocStats::reset();
     {
-        map_t m; // no allocate
-        assert(AllocStats::alloc_count == 0);
+        map_t m; // capa = 8
+        assert(m.capacity() == 8);
+        assert(AllocStats::alloc_count == 16);
         m.reserve(32);
         assert(m.capacity() == 64);
-        assert(AllocStats::alloc_count == 128); // 分配了 64 key + 64 pair
+        assert(AllocStats::alloc_count == 144);
 
         for (UInt32 i = 0; i < 32; ++i) m.emplace(i, i * 10u);
 
         m.max_load_factor(0.5f);
         assert(m.capacity() == 64);
-        m.reserve(128); // rehash，分配 256 个新 pair
+        m.reserve(128);
         assert(m.capacity() == 256);
 
         for (UInt32 i = 0; i < 16; ++i) (void)m.erase(i);
     }
-    assert(AllocStats::alloc_count == 640);
-    assert(AllocStats::dealloc_count == 640);
+    assert(AllocStats::alloc_count == 656);
+    assert(AllocStats::dealloc_count == 656);
 }
 
 int main() {

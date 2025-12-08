@@ -470,7 +470,7 @@ template <class Map> static void BM_StringFindMiss(benchmark::State &state, floa
 
 // ---------------- 注册所有基准 ----------------
 
-using std_umap_u32 = std::unordered_map<std::uint32_t, std::uint32_t>;
+using std_umap_u32 = std::unordered_map<std::uint32_t, std::uint32_t, mcl::detail::FastUInt32Hash>;
 using std_umap_u64 = std::unordered_map<std::uint64_t, std::uint32_t>;
 using flat_map_u32 = mcl::flat_hash_map_u32_soa<std::uint32_t>;
 using flat_map_u64 = mcl::flat_hash_map<std::uint64_t, std::uint32_t>;
@@ -541,7 +541,7 @@ template <class Map> void register_string_family(const std::string &prefix) {
 
 void register_all_benchmarks() {
     // 整数：只测 u32 随机分布，std vs flat
-    // register_int_family<std_umap_u32, std::uint32_t>("std_umap_u32");
+    register_int_family<std_umap_u32, std::uint32_t>("std_umap_u32");
     register_int_family<flat_map_u32, std::uint32_t>("flat_map_u32");
 
     // 短字符串：只测 std::string vs flat_map<std::string_view>

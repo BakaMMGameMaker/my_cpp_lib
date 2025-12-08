@@ -2307,7 +2307,6 @@ private:
     }
 }; // flat hash map uint32
 
-// 尝试不用 pair，优化 cacheline
 template <typename MappedType, typename HasherType = detail::FastUInt32Hash,
           typename Alloc = std::allocator<std::pair<UInt32, MappedType>>> // TODO：Alloc 的默认参数可能需要更换
 class flat_hash_map_u32_soa {
@@ -2457,11 +2456,7 @@ public:
         friend bool operator!=(const const_iterator &lhs, const const_iterator &rhs) noexcept { return !(lhs == rhs); }
     };
 
-    flat_hash_map_u32_soa() noexcept(std::is_nothrow_default_constructible_v<hasher_type> &&
-                                     std::is_nothrow_default_constructible_v<Alloc>)
-        : hasher_(), alloc_(), slot_alloc_(alloc_), value_alloc_(alloc_) {}
-
-    explicit flat_hash_map_u32_soa(size_type init_size, const Alloc &alloc = Alloc{})
+    explicit flat_hash_map_u32_soa(size_type init_size = 1, const Alloc &alloc = Alloc{})
         : hasher_(), alloc_(alloc), slot_alloc_(alloc_), value_alloc_(alloc_) {
         reserve(init_size);
     }
@@ -2506,8 +2501,8 @@ public:
     flat_hash_map_u32_soa(flat_hash_map_u32_soa &&other) noexcept
         : hasher_(std::move(other.hasher_)), alloc_(std::move(other.alloc_)), slot_alloc_(std::move(other.slot_alloc_)),
           value_alloc_(std::move(other.value_alloc_)), slots_(other.slots_), values_(other.values_),
-          capacity_(other.capacity_), size_(other.size_), max_load_factor_(other.max_load_factor_),
-          bucket_mask_(other.bucket_mask_)
+          capacity_(other.capacity_), bucket_mask_(other.bucket_mask_), size_(other.size_),
+          growth_limit_(other.growth_limit_), max_load_factor_(other.max_load_factor_)
 #ifdef DEBUG
           ,
           total_probes_(other.total_probes_), probe_ops_(other.probe_ops_), max_probe_len_(other.max_probe_len_),
@@ -2519,6 +2514,7 @@ public:
         other.capacity_ = 0;
         other.bucket_mask_ = 0;
         other.size_ = 0;
+        other.growth_limit_ = 0;
 #ifdef DEBUG
         other.total_probes_ = 0;
         other.probe_ops_ = 0;
@@ -2546,9 +2542,10 @@ public:
         slots_ = other.slots_;
         values_ = other.values_;
         capacity_ = other.capacity_;
-        size_ = other.size_;
-        max_load_factor_ = other.max_load_factor_;
         bucket_mask_ = other.bucket_mask_;
+        size_ = other.size_;
+        growth_limit_ = other.growth_limit_;
+        max_load_factor_ = other.max_load_factor_;
 #ifdef DEBUG
         total_probes_ = other.total_probes_;
         probe_ops_ = other.probe_ops_;
@@ -2562,6 +2559,7 @@ public:
         other.capacity_ = 0;
         other.bucket_mask_ = 0;
         other.size_ = 0;
+        other.growth_limit_ = 0;
 #ifdef DEBUG
         other.total_probes_ = 0;
         other.probe_ops_ = 0;
@@ -2652,9 +2650,10 @@ public:
         swap(slots_, other.slots_);
         swap(values_, other.values_);
         swap(capacity_, other.capacity_);
-        swap(size_, other.size_);
-        swap(max_load_factor_, other.max_load_factor_);
         swap(bucket_mask_, other.bucket_mask_);
+        swap(size_, other.size_);
+        swap(growth_limit_, other.growth_limit_);
+        swap(max_load_factor_, other.max_load_factor_);
 #ifdef DEBUG
         swap(total_probes_, other.total_probes_);
         swap(probe_ops_, other.probe_ops_);
@@ -2684,6 +2683,7 @@ public:
                 values_ = nullptr;
                 capacity_ = 0;
                 bucket_mask_ = 0;
+                growth_limit_ = 0;
 #ifdef DEBUG
                 ++rehash_count_;
 #endif
@@ -2868,7 +2868,6 @@ private:
     // 如果要 find miss 快，则反过来
     // 当前这个版本，对于 find hit 最为友好，谨慎调整
     size_type get_key_index(const key_type &key) const noexcept {
-        if (capacity_ == 0) return npos;
         size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
         // 注意，乐观预测很可能是不必要的，会让编译器觉得这是小聪明，且降低分支预测成功率
 #ifdef DEBUG
@@ -2896,7 +2895,6 @@ private:
     }
 
     size_type find_or_insert_default(const key_type &key) {
-        if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
         if (size_ >= growth_limit_) { // 临界元素
             size_type existing = get_key_index(key);
             if (existing != npos) return existing;
@@ -2935,7 +2933,6 @@ private:
     template <typename M>
         requires(std::constructible_from<mapped_type, M>)
     std::pair<size_type, bool> find_or_insert_kv(const key_type &key, M &&mapped) {
-        if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
         if (size_ >= growth_limit_) {
             size_type existing = get_key_index(key);
             if (existing != npos) return {existing, false};
@@ -2974,7 +2971,6 @@ private:
     template <typename M>
         requires(std::constructible_from<mapped_type, M>)
     std::pair<size_type, bool> find_and_insert_or_assign(const key_type &key, M &&mapped) {
-        if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
         if (size_ >= growth_limit_) {
             size_type existing = get_key_index(key);
             if (existing != npos) {
@@ -3017,7 +3013,6 @@ private:
     template <typename... Args>
         requires(std::constructible_from<mapped_type, Args...>)
     std::pair<size_type, bool> find_or_try_emplace(const key_type &key, Args &&...args) {
-        if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
         if (size_ >= growth_limit_) {
             size_type existing = get_key_index(key);
             if (existing != npos) return {existing, false};
@@ -3071,6 +3066,7 @@ private:
     }
 
     // 注意这里 destroy all 和泛型版本不一样，每个槽位都有构造过的 Slot 对象
+    // TODO：在 valuetype 也是 pod 类型的情况下，可以直接省去 destroy 的步骤
     void destroy_all() noexcept {
         for (size_type index = 0; index < capacity_; ++index) {
             if (slots_[index].key != k_unoccupied) std::destroy_at(values_ + index);

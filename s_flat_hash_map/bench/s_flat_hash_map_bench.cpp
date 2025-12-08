@@ -469,7 +469,7 @@ template <class Map> static void BM_StringEraseHalfInsertHalf(benchmark::State &
 
 // ---------------- 注册所有基准 ----------------
 
-using std_umap_u32 = std::unordered_map<std::uint32_t, std::uint32_t>;
+using std_umap_u32 = std::unordered_map<std::uint32_t, std::uint32_t, mcl::detail::FastUInt32Hash>;
 using std_umap_u64 = std::unordered_map<std::uint64_t, std::uint32_t>;
 using flat_map_u32 = mcl::flat_hash_map<std::uint32_t, std::uint32_t>;
 using flat_map_u64 = mcl::flat_hash_map<std::uint64_t, std::uint32_t>;
