@@ -3,8 +3,8 @@
 #undef NDEBUG
 #endif
 
-#include "s_flat_hash_map.hpp"
-#include "salias.h"
+#include "s_alias.h"
+#include "s_flat_map.hpp"
 #include <cassert>
 #include <iostream>
 #include <memory>

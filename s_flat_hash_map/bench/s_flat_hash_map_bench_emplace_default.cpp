@@ -1,4 +1,5 @@
-#include "s_flat_hash_map.hpp"
+#include "s_flat_map.hpp"
+#include "s_flat_map_u32.hpp"
 #include <algorithm>
 #include <array>
 #include <benchmark/benchmark.h>

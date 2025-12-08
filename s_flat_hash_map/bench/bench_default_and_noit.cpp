@@ -126,29 +126,30 @@ template <class Key> IntDataset<Key> prepare_int_dataset(KeyDistribution dist, s
     return data;
 }
 
-// ---------------- emplace / emplace_no_rehash 策略 ----------------
+// ---------------- emplace / emplace_noit 策略 ----------------
 
-template <bool UseNoRehash, class Map>
-inline void bench_emplace(Map &map, const typename Map::key_type &key, std::uint32_t value) {
-    if constexpr (UseNoRehash) {
-        auto res = map.emplace_no_rehash(key, value);
-        benchmark::DoNotOptimize(res);
+template <bool UseNoIter, class Map>
+inline void bench_emplace_like(Map &map, const typename Map::key_type &key, std::uint32_t value) {
+    if constexpr (UseNoIter) {
+        // 无返回值接口：减少 pair<iterator, bool> 和 iterator 的构造
+        map.emplace_noit(key, value);
     } else {
+        // 正常 emplace：返回 pair<iterator, bool>
         auto res = map.emplace(key, value);
         benchmark::DoNotOptimize(res);
     }
 }
 
-template <bool UseNoRehash, class Map, class Key> void fill_map_with_keys(Map &map, const std::vector<Key> &keys) {
+template <bool UseNoIter, class Map, class Key> void fill_map_with_keys(Map &map, const std::vector<Key> &keys) {
     map.reserve(keys.size());
     for (std::size_t i = 0; i < keys.size(); ++i) {
-        bench_emplace<UseNoRehash>(map, keys[i], static_cast<std::uint32_t>(i));
+        bench_emplace_like<UseNoIter>(map, keys[i], static_cast<std::uint32_t>(i));
     }
 }
 
 // ---------------- 基准本体：insert & insert_dup ----------------
 
-template <bool UseNoRehash, class Map, class Key>
+template <bool UseNoIter, class Map, class Key>
 static void BM_InsertKeys(benchmark::State &state, KeyDistribution dist, float max_load_factor) {
     const std::size_t N = static_cast<std::size_t>(state.range(0));
     const auto dataset = prepare_int_dataset<Key>(dist, N);
@@ -158,7 +159,7 @@ static void BM_InsertKeys(benchmark::State &state, KeyDistribution dist, float m
     for (auto _ : state) {
         Map map;
         apply_max_load_factor(map, max_load_factor);
-        fill_map_with_keys<UseNoRehash>(map, dataset.keys);
+        fill_map_with_keys<UseNoIter>(map, dataset.keys);
         state.PauseTiming();
         counters.add(map);
         state.ResumeTiming();
@@ -168,21 +169,22 @@ static void BM_InsertKeys(benchmark::State &state, KeyDistribution dist, float m
     counters.publish(state, max_load_factor, label);
 }
 
-template <bool UseNoRehash, class Map, class Key>
+template <bool UseNoIter, class Map, class Key>
 static void BM_InsertDuplicateKeys(benchmark::State &state, KeyDistribution dist, float max_load_factor) {
     const std::size_t N = static_cast<std::size_t>(state.range(0));
     const auto dataset = prepare_int_dataset<Key>(dist, N);
 
     Map map;
     apply_max_load_factor(map, max_load_factor);
-    fill_map_with_keys<UseNoRehash>(map, dataset.keys); // 先插满
+    // 先插满一遍：保持“不重复插入”和“重复插入”场景一致
+    fill_map_with_keys<UseNoIter>(map, dataset.keys);
 
     DebugCounters counters;
     const auto label = build_label(dist, max_load_factor);
 
     for (auto _ : state) {
         for (std::size_t i = 0; i < N; ++i) {
-            bench_emplace<UseNoRehash>(map, dataset.keys[i], static_cast<std::uint32_t>(i));
+            bench_emplace_like<UseNoIter>(map, dataset.keys[i], static_cast<std::uint32_t>(i));
         }
         state.PauseTiming();
         counters.add(map);
@@ -197,7 +199,7 @@ static void BM_InsertDuplicateKeys(benchmark::State &state, KeyDistribution dist
 
 using flat_map_u32 = mcl::flat_hash_map_u32_soa<std::uint32_t>;
 
-template <bool UseNoRehash, class Map, class Key> void register_int_family(const std::string &prefix) {
+template <bool UseNoIter, class Map, class Key> void register_int_family(const std::string &prefix) {
     // 只测随机分布，最能体现实际表现
     constexpr KeyDistribution kDist = KeyDistribution::kRandom;
 
@@ -205,11 +207,11 @@ template <bool UseNoRehash, class Map, class Key> void register_int_family(const
         const std::string suffix = suffix_for(kDist, load_factor);
 
         auto *insert = benchmark::RegisterBenchmark((prefix + "_insert_" + suffix).c_str(),
-                                                    &BM_InsertKeys<UseNoRehash, Map, Key>, kDist, load_factor);
+                                                    &BM_InsertKeys<UseNoIter, Map, Key>, kDist, load_factor);
 
         auto *insert_dup =
             benchmark::RegisterBenchmark((prefix + "_insert_dup_" + suffix).c_str(),
-                                         &BM_InsertDuplicateKeys<UseNoRehash, Map, Key>, kDist, load_factor);
+                                         &BM_InsertDuplicateKeys<UseNoIter, Map, Key>, kDist, load_factor);
 
         for (auto size : kSizes) {
             const auto arg = static_cast<std::int64_t>(size);
@@ -220,11 +222,11 @@ template <bool UseNoRehash, class Map, class Key> void register_int_family(const
 }
 
 void register_all_benchmarks() {
-    // checked 路径：正常 emplace
-    register_int_family<false, flat_map_u32, std::uint32_t>("flat_map_u32_emplace");
+    // 返回 pair<iterator, bool> 的 emplace
+    register_int_family<false, flat_map_u32, std::uint32_t>("flat_map_u32_emplace_ret");
 
-    // unchecked 路径：emplace_no_rehash
-    register_int_family<true, flat_map_u32, std::uint32_t>("flat_map_u32_emplace_no_rehash");
+    // 无返回值 emplace_noit
+    register_int_family<true, flat_map_u32, std::uint32_t>("flat_map_u32_emplace_noit");
 }
 
 const bool registered = [] {
