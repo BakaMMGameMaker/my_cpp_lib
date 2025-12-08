@@ -56,19 +56,32 @@ add_executable(s_flat_hash_map_u32_basic
 # =====================================================
 #                     Target 2: Benchmarks
 # =====================================================
-add_executable(s_flat_hash_map_bench
-    s_flat_hash_map/bench/s_flat_hash_map_bench.cpp
+add_executable(s_flat_hash_map_bench_emplace_default
+    s_flat_hash_map/bench/s_flat_hash_map_bench_emplace_default.cpp
+)
+add_executable(s_flat_hash_map_bench_emplace_noit
+    s_flat_hash_map/bench/s_flat_hash_map_bench_emplace_noit.cpp
+)
+add_executable(bench_default_and_no_rehash
+    s_flat_hash_map/bench/bench_default_and_no_rehash.cpp
 )
 
-# =====================================================
-#                 Target 3: Small Benchmarks
-# =====================================================
-add_executable(s_flat_hash_map_bench_small
-    s_flat_hash_map/bench/s_flat_hash_map_bench_small.cpp
+target_compile_definitions(s_flat_hash_map_bench_emplace_default PRIVATE BENCHMARK_STATIC_DEFINE)
+target_compile_options(s_flat_hash_map_bench_emplace_default PRIVATE
+    -Wno-used-but-marked-unused
+    -Wno-switch-default
+    -Wno-unneeded-internal-declaration
+    -Wno-unused-template
 )
-
-target_compile_definitions(s_flat_hash_map_bench_small PRIVATE BENCHMARK_STATIC_DEFINE)
-target_compile_options(s_flat_hash_map_bench_small PRIVATE
+target_compile_definitions(s_flat_hash_map_bench_emplace_noit PRIVATE BENCHMARK_STATIC_DEFINE)
+target_compile_options(s_flat_hash_map_bench_emplace_noit PRIVATE
+    -Wno-used-but-marked-unused
+    -Wno-switch-default
+    -Wno-unneeded-internal-declaration
+    -Wno-unused-template
+)
+target_compile_definitions(bench_default_and_no_rehash PRIVATE BENCHMARK_STATIC_DEFINE)
+target_compile_options(bench_default_and_no_rehash PRIVATE
     -Wno-used-but-marked-unused
     -Wno-switch-default
     -Wno-unneeded-internal-declaration
@@ -76,20 +89,17 @@ target_compile_options(s_flat_hash_map_bench_small PRIVATE
 )
 
 
-target_link_libraries(s_flat_hash_map_bench_small PRIVATE
+target_link_libraries(s_flat_hash_map_bench_emplace_default PRIVATE
     benchmark
     benchmark_main
     shlwapi
 )
-
-
-target_compile_definitions(s_flat_hash_map_bench PRIVATE BENCHMARK_STATIC_DEFINE)
-target_compile_options(s_flat_hash_map_bench PRIVATE
-    -Wno-used-but-marked-unused
-    -Wno-switch-default
+target_link_libraries(s_flat_hash_map_bench_emplace_noit PRIVATE
+    benchmark
+    benchmark_main
+    shlwapi
 )
-
-target_link_libraries(s_flat_hash_map_bench PRIVATE
+target_link_libraries(bench_default_and_no_rehash PRIVATE
     benchmark
     benchmark_main
     shlwapi

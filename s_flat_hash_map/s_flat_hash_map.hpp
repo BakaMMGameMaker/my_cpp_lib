@@ -2780,10 +2780,20 @@ public:
     }
 
     // 无返回值的 emplace，实际优化效果可能有限，毕竟构造迭代器成本不大
+    // TODO：各种插入的无返回值版本，但优先级较低，因为对性能提升有限
     template <typename M>
         requires(std::constructible_from<mapped_type, M>)
     void emplace_noit(const key_type &key, M &&mapped) {
         find_or_insert_kv_no_return(key, std::forward<M>(mapped));
+    }
+
+    // 不检查是否需要扩容的重载，使用前用 reserve 自行确保空间足够
+    // （这玩意居然在 insert random 种毫无优势，但在 insert dup 却有明显性能提升，难以理解）
+    template <typename M>
+        requires(std::constructible_from<mapped_type, M>)
+    std::pair<iterator, bool> emplace_no_rehash(const key_type &key, M &&mapped) {
+        auto [index, inserted] = find_or_insert_kv_no_rehash(key, std::forward<M>(mapped));
+        return {iterator(this, index), inserted};
     }
 
     template <typename... Args>
@@ -3002,6 +3012,40 @@ private:
                 record_probe(probe_len);
 #endif
                 return;
+            }
+            index = (index + 1) & bucket_mask_;
+        }
+    }
+
+    // 不检查是否需要扩容的版本
+    template <typename M>
+        requires(std::constructible_from<mapped_type, M>)
+    std::pair<size_type, bool> find_or_insert_kv_no_rehash(const key_type &key, M &&mapped) {
+        size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
+#ifdef DEBUG
+        SizeT probe_len = 0;
+#endif
+        for (;;) {
+#ifdef DEBUG
+            ++probe_len;
+#endif
+            slot_type &slot = slots_[index];
+            key_type stored_key = slot.key;
+            if (stored_key == k_unoccupied) {
+                slot.key = key;
+                std::construct_at(values_ + index, std::piecewise_construct, std::forward_as_tuple(key),
+                                  std::forward_as_tuple(std::forward<M>(mapped)));
+                ++size_;
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return {index, true};
+            }
+            if (stored_key == key) {
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return {index, false};
             }
             index = (index + 1) & bucket_mask_;
         }

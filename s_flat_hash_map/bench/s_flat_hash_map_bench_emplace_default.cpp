@@ -2,7 +2,6 @@
 #include <algorithm>
 #include <array>
 #include <benchmark/benchmark.h>
-#include <concepts>
 #include <cstdint>
 #include <iomanip>
 #include <random>
@@ -166,22 +165,6 @@ private:
 #endif
 };
 
-template <class Map>
-concept HasEmplaceNoIt = requires(Map &m, const typename Map::key_type &k, std::uint32_t v) {
-    { m.emplace_noit(k, v) } -> std::same_as<void>;
-};
-
-template <class Map> inline void bench_emplace(Map &map, const typename Map::key_type &key, std::uint32_t value) {
-    if constexpr (HasEmplaceNoIt<Map>) {
-        // 走无返回值版本
-        map.emplace_noit(key, value);
-    } else {
-        // 照旧用 emplace，并保持 DoNotOptimize 防止优化掉
-        auto res = map.emplace(key, value);
-        benchmark::DoNotOptimize(res);
-    }
-}
-
 template <class Key> struct IntDataset {
     std::vector<Key> keys;
     std::vector<Key> miss_keys;
@@ -202,7 +185,7 @@ template <class Key> IntDataset<Key> prepare_int_dataset(KeyDistribution dist, s
 
 template <class Map, class Key> void fill_map_with_keys(Map &map, const std::vector<Key> &keys) {
     map.reserve(keys.size());
-    for (std::size_t i = 0; i < keys.size(); ++i) { bench_emplace(map, keys[i], static_cast<std::uint32_t>(i)); }
+    for (std::size_t i = 0; i < keys.size(); ++i) { map.emplace(keys[i], static_cast<std::uint32_t>(i)); }
 }
 
 template <class Map, class Key>
@@ -238,7 +221,10 @@ static void BM_InsertDuplicateKeys(benchmark::State &state, KeyDistribution dist
     const auto label = build_label(dist, max_load_factor);
 
     for (auto _ : state) {
-        for (std::size_t i = 0; i < N; ++i) { bench_emplace(map, dataset.keys[i], static_cast<std::uint32_t>(i)); }
+        for (std::size_t i = 0; i < N; ++i) {
+            auto res = map.emplace(dataset.keys[i], static_cast<std::uint32_t>(i));
+            benchmark::DoNotOptimize(res);
+        }
         state.PauseTiming();
         counters.add(map);
         state.ResumeTiming();
@@ -443,7 +429,10 @@ template <class Map> static void BM_StringInsertDuplicate(benchmark::State &stat
     const auto label = build_string_label(max_load_factor);
 
     for (auto _ : state) {
-        for (std::size_t i = 0; i < N; ++i) { bench_emplace(map, map_keys.keys[i], static_cast<std::uint32_t>(i)); }
+        for (std::size_t i = 0; i < N; ++i) {
+            auto res = map.emplace(map_keys.keys[i], static_cast<std::uint32_t>(i));
+            benchmark::DoNotOptimize(res);
+        }
         state.PauseTiming();
         counters.add(map);
         state.ResumeTiming();
@@ -552,7 +541,7 @@ template <class Map> void register_string_family(const std::string &prefix) {
 
 void register_all_benchmarks() {
     // 整数：只测 u32 随机分布，std vs flat
-    register_int_family<std_umap_u32, std::uint32_t>("std_umap_u32");
+    // register_int_family<std_umap_u32, std::uint32_t>("std_umap_u32");
     register_int_family<flat_map_u32, std::uint32_t>("flat_map_u32");
 
     // 短字符串：只测 std::string vs flat_map<std::string_view>

@@ -209,6 +209,35 @@ static void test_basic_operations() {
         assert(m3.contains(4));
         assert(m3.contains(5));
     }
+
+    // emplace no rehash
+    {
+        map_t m4;
+        m4.reserve(64);
+        assert(m4.capacity() == 128);
+        m4.emplace_no_rehash(1, 12);
+        assert(m4.size() == 1);
+        assert(m4.contains(1));
+        assert(m4.find(1) != m4.end());
+        m4.emplace_no_rehash(1, 23);
+        assert(m4.size() == 1);
+
+        for (UInt32 i = 2; i < 6; ++i) {
+            m4.emplace_no_rehash(i, i * 10);
+            assert(m4.contains(i));
+            assert(m4.find(i) != m4.end());
+            auto [it, inserted] = m4.emplace(i, i * 20);
+            assert(it->second = i * 10);
+            assert(!inserted);
+        }
+        assert(m4.size() == 5);
+        assert(m4.capacity() == 128);
+        m4.erase(3);
+        assert(m4.contains(2));
+        assert(!m4.contains(3));
+        assert(m4.contains(4));
+        assert(m4.contains(5));
+    }
 }
 
 static void test_insert_range_and_init_list() {
