@@ -2736,20 +2736,12 @@ public:
     const_iterator end() const noexcept { return cend(); }
     const_iterator cend() const noexcept { return const_iterator(this, capacity_); }
 
-    iterator find(const key_type &key) noexcept {
-        // 不检查是否在查找哨兵值
-        size_type index = get_key_index(key);
-        if (index == npos) return end();
-        return iterator(this, index);
-    }
+    // 不检查是否在查找哨兵值
+    iterator find(const key_type &key) noexcept { return iterator(this, get_key_index(key)); }
 
-    const_iterator find(const key_type &key) const noexcept {
-        size_type index = get_key_index(key);
-        if (index == npos) return cend();
-        return const_iterator(this, index);
-    }
+    const_iterator find(const key_type &key) const noexcept { return const_iterator(this, get_key_index(key)); }
 
-    bool contains(const key_type &key) const noexcept { return get_key_index(key) != npos; }
+    bool contains(const key_type &key) const noexcept { return get_key_index(key) != capacity_; }
 
     mapped_type &at(const key_type &key) {
         auto it = find(key);
@@ -2787,6 +2779,13 @@ public:
         return {iterator(this, index), inserted};
     }
 
+    // 无返回值的 emplace，实际优化效果可能有限，毕竟构造迭代器成本不大
+    template <typename M>
+        requires(std::constructible_from<mapped_type, M>)
+    void emplace_noit(const key_type &key, M &&mapped) {
+        find_or_insert_kv_no_return(key, std::forward<M>(mapped));
+    }
+
     template <typename... Args>
         requires(std::constructible_from<mapped_type, Args...>)
     std::pair<iterator, bool> try_emplace(const key_type &key, Args &&...args) {
@@ -2804,11 +2803,12 @@ public:
 
     size_type erase(const key_type &key) {
         size_type index = get_key_index(key);
-        if (index == npos) return 0;
+        if (index == capacity_) return 0;
         erase_at_index(index);
         return 1;
     }
 
+    // 不检查 pos 是否指向合法槽位
     iterator erase(const_iterator pos) {
         if (pos == end()) return end();
         size_type index = pos.index_;
@@ -2831,7 +2831,6 @@ public:
 #endif
 
 private:
-    static constexpr size_type npos = static_cast<size_type>(-1);
     static constexpr key_type k_unoccupied = std::numeric_limits<UInt32>::max();
 
     hasher_type hasher_{};
@@ -2867,6 +2866,7 @@ private:
     // 如果要 find hit 快，先判断是否等于 key 再判是否为未占用
     // 如果要 find miss 快，则反过来
     // 当前这个版本，对于 find hit 最为友好，谨慎调整
+    // 返回 capacity_ 代替 npos，减少外部分支
     size_type get_key_index(const key_type &key) const noexcept {
         size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
         // 注意，乐观预测很可能是不必要的，会让编译器觉得这是小聪明，且降低分支预测成功率
@@ -2888,16 +2888,17 @@ private:
 #ifdef DEBUG
                 record_probe(probe_len);
 #endif
-                return npos;
+                return capacity_; // 用 capacity_ 代替 npos，减少外部分支
             }
             index = (index + 1) & bucket_mask_;
         }
     }
 
+    // TODO: no return type 版本 以及 uncheck 版本
     size_type find_or_insert_default(const key_type &key) {
         if (size_ >= growth_limit_) { // 临界元素
             size_type existing = get_key_index(key);
-            if (existing != npos) return existing;
+            if (existing != capacity_) return existing;
             double_storage();
         }
         size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
@@ -2935,7 +2936,7 @@ private:
     std::pair<size_type, bool> find_or_insert_kv(const key_type &key, M &&mapped) {
         if (size_ >= growth_limit_) {
             size_type existing = get_key_index(key);
-            if (existing != npos) return {existing, false};
+            if (existing != capacity_) return {existing, false};
             double_storage();
         }
         size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
@@ -2968,12 +2969,50 @@ private:
         }
     }
 
+    // 不处理返回值的版本
+    template <typename M>
+        requires(std::constructible_from<mapped_type, M>)
+    void find_or_insert_kv_no_return(const key_type &key, M &&mapped) {
+        if (size_ >= growth_limit_) {
+            if (get_key_index(key) != capacity_) return;
+            double_storage();
+        }
+        size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
+#ifdef DEBUG
+        SizeT probe_len = 0;
+#endif
+        for (;;) {
+#ifdef DEBUG
+            ++probe_len;
+#endif
+            slot_type &slot = slots_[index];
+            key_type stored_key = slot.key;
+            if (stored_key == k_unoccupied) {
+                slot.key = key;
+                std::construct_at(values_ + index, std::piecewise_construct, std::forward_as_tuple(key),
+                                  std::forward_as_tuple(std::forward<M>(mapped)));
+                ++size_;
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return;
+            }
+            if (stored_key == key) {
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return;
+            }
+            index = (index + 1) & bucket_mask_;
+        }
+    }
+
     template <typename M>
         requires(std::constructible_from<mapped_type, M>)
     std::pair<size_type, bool> find_and_insert_or_assign(const key_type &key, M &&mapped) {
         if (size_ >= growth_limit_) {
             size_type existing = get_key_index(key);
-            if (existing != npos) {
+            if (existing != capacity_) {
                 values_[existing].second = std::forward<M>(mapped);
                 return {existing, false};
             }
@@ -3015,7 +3054,7 @@ private:
     std::pair<size_type, bool> find_or_try_emplace(const key_type &key, Args &&...args) {
         if (size_ >= growth_limit_) {
             size_type existing = get_key_index(key);
-            if (existing != npos) return {existing, false};
+            if (existing != capacity_) return {existing, false};
             double_storage();
         }
         size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
@@ -3159,7 +3198,7 @@ private:
 
             const value_type &kv = lhs.values_[index];
             size_type result = rhs.get_key_index(kv.first);
-            if (result == npos) return false;
+            if (result == rhs.capacity_) return false;
             if (!(kv.second == rhs.values_[result].second)) return false;
         }
         return true;

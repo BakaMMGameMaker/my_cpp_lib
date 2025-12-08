@@ -49,6 +49,10 @@ add_executable(s_flat_hash_map_basic
     s_flat_hash_map/tests/s_flat_hash_map_basic.cpp
 )
 
+add_executable(s_flat_hash_map_u32_basic
+    s_flat_hash_map/tests/s_flat_hash_map_u32_basic.cpp
+)
+
 # =====================================================
 #                     Target 2: Benchmarks
 # =====================================================
