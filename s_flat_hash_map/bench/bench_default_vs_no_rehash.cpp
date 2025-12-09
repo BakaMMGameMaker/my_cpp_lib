@@ -131,7 +131,7 @@ template <class Key> IntDataset<Key> prepare_int_dataset(KeyDistribution dist, s
 template <bool UseNoRehash, class Map>
 inline void bench_emplace(Map &map, const typename Map::key_type &key, std::uint32_t value) {
     if constexpr (UseNoRehash) {
-        auto res = map.emplace_no_rehash(key, value);
+        auto res = map.template emplace<mcl::no_rehash>(key, value);
         benchmark::DoNotOptimize(res);
     } else {
         auto res = map.emplace(key, value);
@@ -195,7 +195,7 @@ static void BM_InsertDuplicateKeys(benchmark::State &state, KeyDistribution dist
 
 // ---------------- 注册：只测 random insert & insert_dup ----------------
 
-using flat_map_u32 = mcl::flat_hash_map_u32_soa<std::uint32_t>;
+using flat_map_u32 = mcl::flat_hash_map_u32<std::uint32_t>;
 
 template <bool UseNoRehash, class Map, class Key> void register_int_family(const std::string &prefix) {
     // 只测随机分布，最能体现实际表现

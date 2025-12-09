@@ -1,4 +1,5 @@
 #include "s_flat_map_u32.hpp"
+#include <algorithm>
 #include <array>
 #include <benchmark/benchmark.h>
 #include <cstdint>
@@ -46,14 +47,45 @@ std::string build_label(KeyDistribution dist, float load_factor) {
     return oss.str();
 }
 
-template <typename Key> std::vector<Key> make_random_keys(std::size_t N, std::uint64_t seed = 123456) {
-    static_assert(std::is_integral_v<Key>, "random keys require integral types");
-    std::mt19937_64 rng(seed);
-    std::vector<Key> keys;
-    keys.reserve(N);
-    for (std::size_t i = 0; i < N; ++i) { keys.push_back(static_cast<Key>(rng())); }
+// ---------------- 唯一整数 key 数据集：保证无重复 ----------------
+
+template <typename Key> std::vector<Key> make_sequential_keys(std::size_t N) {
+    static_assert(std::is_integral_v<Key>, "sequential keys require integral types");
+    std::vector<Key> keys(N);
+    for (std::size_t i = 0; i < N; ++i) { keys[i] = static_cast<Key>(i); }
     return keys;
 }
+
+template <typename Key> std::vector<Key> make_random_unique_keys(std::size_t N, std::uint64_t seed = 123456) {
+    // 先生成 [0, N)，再洗牌，既随机又无重复
+    auto keys = make_sequential_keys<Key>(N);
+    std::mt19937_64 rng(seed);
+    std::shuffle(keys.begin(), keys.end(), rng);
+    return keys;
+}
+
+template <class Key> struct IntDataset {
+    std::vector<Key> keys;
+};
+
+template <class Key> IntDataset<Key> prepare_int_dataset(KeyDistribution dist, std::size_t N) {
+    IntDataset<Key> data;
+    switch (dist) {
+    case KeyDistribution::kRandom:
+        data.keys = make_random_unique_keys<Key>(N);
+        break;
+    case KeyDistribution::kSequential:
+        data.keys = make_sequential_keys<Key>(N);
+        break;
+    case KeyDistribution::kClustered:
+        // 懒得给你搞复杂聚类分布，先用随机唯一，够你虐接口了
+        data.keys = make_random_unique_keys<Key>(N);
+        break;
+    }
+    return data;
+}
+
+// ---------------- Debug 统计（和你原来的风格一致） ----------------
 
 template <class Map>
 concept HasDebugStats = requires(const Map &map) { map.get_debug_stats(); };
@@ -107,49 +139,30 @@ private:
 #endif
 };
 
-template <class Key> struct IntDataset {
-    std::vector<Key> keys;
-};
+// ---------------- emplace / emplace fast 策略 ----------------
 
-template <class Key> IntDataset<Key> prepare_int_dataset(KeyDistribution dist, std::size_t N) {
-    IntDataset<Key> data;
-    switch (dist) {
-    case KeyDistribution::kRandom:
-        data.keys = make_random_keys<Key>(N);
-        break;
-    case KeyDistribution::kSequential:
-    case KeyDistribution::kClustered:
-        // 当前只用随机分布就够了，其他分布有需要再开
-        data.keys = make_random_keys<Key>(N);
-        break;
-    }
-    return data;
-}
-
-// ---------------- emplace / emplace_noit 策略 ----------------
-
-template <bool UseNoIter, class Map>
-inline void bench_emplace_like(Map &map, const typename Map::key_type &key, std::uint32_t value) {
-    if constexpr (UseNoIter) {
-        // 无返回值接口：减少 pair<iterator, bool> 和 iterator 的构造
-        map.emplace_noit(key, value);
+// UseEmplaceFast = false -> emplace
+// UseEmplaceFast = true  -> emplace fast
+template <bool UseEmplaceFast, class Map>
+inline void bench_emplace(Map &map, const typename Map::key_type &key, std::uint32_t value) {
+    if constexpr (UseEmplaceFast) {
+        map.template emplace<mcl::fast>(key, value);
     } else {
-        // 正常 emplace：返回 pair<iterator, bool>
         auto res = map.emplace(key, value);
         benchmark::DoNotOptimize(res);
     }
 }
 
-template <bool UseNoIter, class Map, class Key> void fill_map_with_keys(Map &map, const std::vector<Key> &keys) {
+template <bool UseEmplaceFast, class Map, class Key> void fill_map_with_keys(Map &map, const std::vector<Key> &keys) {
     map.reserve(keys.size());
     for (std::size_t i = 0; i < keys.size(); ++i) {
-        bench_emplace_like<UseNoIter>(map, keys[i], static_cast<std::uint32_t>(i));
+        bench_emplace<UseEmplaceFast>(map, keys[i], static_cast<std::uint32_t>(i));
     }
 }
 
-// ---------------- 基准本体：insert & insert_dup ----------------
+// ---------------- 基准本体：只测一次性插入（无重复键） ----------------
 
-template <bool UseNoIter, class Map, class Key>
+template <bool UseEmplaceFast, class Map, class Key>
 static void BM_InsertKeys(benchmark::State &state, KeyDistribution dist, float max_load_factor) {
     const std::size_t N = static_cast<std::size_t>(state.range(0));
     const auto dataset = prepare_int_dataset<Key>(dist, N);
@@ -159,7 +172,7 @@ static void BM_InsertKeys(benchmark::State &state, KeyDistribution dist, float m
     for (auto _ : state) {
         Map map;
         apply_max_load_factor(map, max_load_factor);
-        fill_map_with_keys<UseNoIter>(map, dataset.keys);
+        fill_map_with_keys<UseEmplaceFast>(map, dataset.keys);
         state.PauseTiming();
         counters.add(map);
         state.ResumeTiming();
@@ -169,64 +182,32 @@ static void BM_InsertKeys(benchmark::State &state, KeyDistribution dist, float m
     counters.publish(state, max_load_factor, label);
 }
 
-template <bool UseNoIter, class Map, class Key>
-static void BM_InsertDuplicateKeys(benchmark::State &state, KeyDistribution dist, float max_load_factor) {
-    const std::size_t N = static_cast<std::size_t>(state.range(0));
-    const auto dataset = prepare_int_dataset<Key>(dist, N);
+// ---------------- 注册：random 场景插入对比 ----------------
 
-    Map map;
-    apply_max_load_factor(map, max_load_factor);
-    // 先插满一遍：保持“不重复插入”和“重复插入”场景一致
-    fill_map_with_keys<UseNoIter>(map, dataset.keys);
+using flat_map_u32 = mcl::flat_hash_map_u32<std::uint32_t>;
 
-    DebugCounters counters;
-    const auto label = build_label(dist, max_load_factor);
-
-    for (auto _ : state) {
-        for (std::size_t i = 0; i < N; ++i) {
-            bench_emplace_like<UseNoIter>(map, dataset.keys[i], static_cast<std::uint32_t>(i));
-        }
-        state.PauseTiming();
-        counters.add(map);
-        state.ResumeTiming();
-    }
-
-    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(N));
-    counters.publish(state, max_load_factor, label);
-}
-
-// ---------------- 注册：只测 random insert & insert_dup ----------------
-
-using flat_map_u32 = mcl::flat_hash_map_u32_soa<std::uint32_t>;
-
-template <bool UseNoIter, class Map, class Key> void register_int_family(const std::string &prefix) {
-    // 只测随机分布，最能体现实际表现
+template <bool UseEmplaceFast, class Map, class Key> void register_int_family(const std::string &prefix) {
     constexpr KeyDistribution kDist = KeyDistribution::kRandom;
 
     for (float load_factor : kLoadFactors) {
         const std::string suffix = suffix_for(kDist, load_factor);
 
         auto *insert = benchmark::RegisterBenchmark((prefix + "_insert_" + suffix).c_str(),
-                                                    &BM_InsertKeys<UseNoIter, Map, Key>, kDist, load_factor);
-
-        auto *insert_dup =
-            benchmark::RegisterBenchmark((prefix + "_insert_dup_" + suffix).c_str(),
-                                         &BM_InsertDuplicateKeys<UseNoIter, Map, Key>, kDist, load_factor);
+                                                    &BM_InsertKeys<UseEmplaceFast, Map, Key>, kDist, load_factor);
 
         for (auto size : kSizes) {
             const auto arg = static_cast<std::int64_t>(size);
             insert->Arg(arg);
-            insert_dup->Arg(arg);
         }
     }
 }
 
 void register_all_benchmarks() {
-    // 返回 pair<iterator, bool> 的 emplace
-    register_int_family<false, flat_map_u32, std::uint32_t>("flat_map_u32_emplace_ret");
+    // checked 路径：正常 emplace
+    register_int_family<false, flat_map_u32, std::uint32_t>("fmu32_emplace");
 
-    // 无返回值 emplace_noit
-    register_int_family<true, flat_map_u32, std::uint32_t>("flat_map_u32_emplace_noit");
+    // fast 路径
+    register_int_family<true, flat_map_u32, std::uint32_t>("fmu32_emplace_fast");
 }
 
 const bool registered = [] {

@@ -3,13 +3,54 @@
 #include "s_detail.h"
 #include <cmath>
 #include <stdexcept>
+#include <type_traits>
 
 namespace mcl {
-namespace detail {}
+
+template <typename P>
+concept EmplacePolicy = requires {
+    { P::return_value } -> std::convertible_to<bool>; // 是否返回值
+    { P::rehash } -> std::convertible_to<bool>;       // 是否触发扩容
+    { P::check_exist } -> std::convertible_to<bool>;  // 是否检查重复键
+};
+
+struct default_emplace_policy {
+    static constexpr bool return_value = true;
+    static constexpr bool rehash = true;
+    static constexpr bool check_exist = true;
+};
+
+// 不返回值
+struct no_return {
+    static constexpr bool return_value = false;
+    static constexpr bool rehash = true;
+    static constexpr bool check_exist = true;
+};
+
+// 不扩容
+struct no_rehash {
+    static constexpr bool return_value = true;
+    static constexpr bool rehash = false;
+    static constexpr bool check_exist = true;
+};
+
+// 不查重
+struct no_check_dup {
+    static constexpr bool return_value = true;
+    static constexpr bool rehash = true;
+    static constexpr bool check_exist = false;
+};
+
+// 仅插入元素
+struct fast {
+    static constexpr bool return_value = false;
+    static constexpr bool rehash = false;
+    static constexpr bool check_exist = false;
+};
 
 template <typename MappedType, typename HasherType = detail::FastUInt32Hash,
           typename Alloc = std::allocator<std::pair<UInt32, MappedType>>> // TODO：Alloc 的默认参数可能需要更换
-class flat_hash_map_u32_soa {
+class flat_hash_map_u32 {
 public:
     using key_type = UInt32;
     using mapped_type = MappedType;
@@ -45,16 +86,16 @@ private:
 public:
     class const_iterator;
     class iterator {
-        friend class flat_hash_map_u32_soa;
+        friend class flat_hash_map_u32;
         friend class const_iterator;
 
     public:
         using iterator_category = std::forward_iterator_tag;
-        using value_type = flat_hash_map_u32_soa::value_type;
-        using difference_type = flat_hash_map_u32_soa::difference_type;
+        using value_type = flat_hash_map_u32::value_type;
+        using difference_type = flat_hash_map_u32::difference_type;
 
     private:
-        using map_type = flat_hash_map_u32_soa;
+        using map_type = flat_hash_map_u32;
         using slot_type = map_type::slot_type;
 
         map_type *map_ = nullptr;
@@ -100,15 +141,15 @@ public:
     };
 
     class const_iterator {
-        friend class flat_hash_map_u32_soa;
+        friend class flat_hash_map_u32;
 
     public:
         using iterator_category = std::forward_iterator_tag;
-        using value_type = const flat_hash_map_u32_soa::value_type;
-        using difference_type = flat_hash_map_u32_soa::difference_type;
+        using value_type = const flat_hash_map_u32::value_type;
+        using difference_type = flat_hash_map_u32::difference_type;
 
     private:
-        using map_type = const flat_hash_map_u32_soa;
+        using map_type = const flat_hash_map_u32;
         using slot_type = const map_type::slot_type;
 
         const map_type *map_ = nullptr;
@@ -156,18 +197,33 @@ public:
         friend bool operator!=(const const_iterator &lhs, const const_iterator &rhs) noexcept { return !(lhs == rhs); }
     };
 
-    explicit flat_hash_map_u32_soa(size_type init_size = 1, const Alloc &alloc = Alloc{})
+private:
+    // return type alias
+    // emplace 返回类型
+    template <EmplacePolicy Policy>
+    using emplace_return_type =
+        std::conditional_t<Policy::return_value,
+                           std::conditional_t<Policy::check_exist, std::pair<iterator, bool>, iterator>, void>;
+
+    // find or insert kv 返回类型
+    template <EmplacePolicy Policy>
+    using find_or_insert_kv_return_type =
+        std::conditional_t<Policy::return_value,
+                           std::conditional_t<Policy::check_exist, std::pair<size_type, bool>, size_type>, void>;
+
+public:
+    explicit flat_hash_map_u32(size_type init_size = 1, const Alloc &alloc = Alloc{})
         : hasher_(), alloc_(alloc), slot_alloc_(alloc_), value_alloc_(alloc_) {
         reserve(init_size);
     }
 
-    flat_hash_map_u32_soa(std::initializer_list<value_type> init, const Alloc &alloc = Alloc{})
+    flat_hash_map_u32(std::initializer_list<value_type> init, const Alloc &alloc = Alloc{})
         : hasher_(), alloc_(alloc), slot_alloc_(alloc_), value_alloc_(alloc_) {
         reserve(init.size());
         for (const auto &kv : init) { insert(kv); }
     }
 
-    flat_hash_map_u32_soa(const flat_hash_map_u32_soa &other)
+    flat_hash_map_u32(const flat_hash_map_u32 &other)
         : hasher_(other.hasher_),
           alloc_(std::allocator_traits<Alloc>::select_on_container_copy_construction(other.alloc_)),
           slot_alloc_(alloc_), value_alloc_(alloc_) {
@@ -179,7 +235,7 @@ public:
         }
     }
 
-    flat_hash_map_u32_soa &operator=(const flat_hash_map_u32_soa &other) {
+    flat_hash_map_u32 &operator=(const flat_hash_map_u32 &other) {
         if (this == &other) return *this;
         clear();
         if constexpr (std::allocator_traits<Alloc>::propagate_on_container_copy_assignment::value) {
@@ -198,7 +254,7 @@ public:
     }
 
     // 照搬布局
-    flat_hash_map_u32_soa(flat_hash_map_u32_soa &&other) noexcept
+    flat_hash_map_u32(flat_hash_map_u32 &&other) noexcept
         : hasher_(std::move(other.hasher_)), alloc_(std::move(other.alloc_)), slot_alloc_(std::move(other.slot_alloc_)),
           value_alloc_(std::move(other.value_alloc_)), slots_(other.slots_), values_(other.values_),
           capacity_(other.capacity_), bucket_mask_(other.bucket_mask_), size_(other.size_),
@@ -224,10 +280,10 @@ public:
 #endif
     }
 
-    flat_hash_map_u32_soa &operator=(flat_hash_map_u32_soa &&other) noexcept {
+    flat_hash_map_u32 &operator=(flat_hash_map_u32 &&other) noexcept {
         static_assert(slot_alloc_traits::is_always_equal::value ||
                           slot_alloc_traits::propagate_on_container_move_assignment::value,
-                      "flat_hash_map_u32_soa requires allocator that is always_equal or propagates on move assignment");
+                      "flat_hash_map_u32 requires allocator that is always_equal or propagates on move assignment");
         if (this == &other) return *this;
         if (capacity_ > 0) {
             destroy_all();
@@ -270,7 +326,7 @@ public:
         return *this;
     }
 
-    ~flat_hash_map_u32_soa() {
+    ~flat_hash_map_u32() {
         if (capacity_ == 0) return;
         destroy_all();
         deallocate_storage();
@@ -335,10 +391,10 @@ public:
         move_old_elements(old_slots, old_values, old_capacity);
     }
 
-    void swap(flat_hash_map_u32_soa &other) noexcept {
+    void swap(flat_hash_map_u32 &other) noexcept {
         static_assert(std::allocator_traits<allocator_type>::propagate_on_container_swap::value ||
                           std::allocator_traits<allocator_type>::is_always_equal::value,
-                      "flat_hash_map_u32_soa requires allocator that is always_equal or propagates on swap");
+                      "flat_hash_map_u32 requires allocator that is always_equal or propagates on swap");
         if (this == &other) return;
         using std::swap;
         if constexpr (std::allocator_traits<allocator_type>::propagate_on_container_swap::value) {
@@ -472,37 +528,46 @@ public:
         return {iterator(this, index), inserted};
     }
 
-    // 默认接口，返回迭代器，检查是否需要扩容且键是否已经存在
-    template <typename M>
+    template <EmplacePolicy Policy = default_emplace_policy, typename M>
         requires(std::constructible_from<mapped_type, M>)
-    std::pair<iterator, bool> emplace(const key_type &key, M &&mapped) {
-        auto [index, inserted] = find_or_insert_kv(key, std::forward<M>(mapped));
-        return {iterator(this, index), inserted};
-    }
-
-    // 无返回值的 emplace
-    // （依然对插入重复键的场景有显著提升，原因不明）
-    template <typename M>
-        requires(std::constructible_from<mapped_type, M>)
-    void emplace_noit(const key_type &key, M &&mapped) {
-        find_or_insert_kv_no_return(key, std::forward<M>(mapped));
-    }
-
-    // 不检查是否需要扩容的重载，使用前用 reserve 自行确保空间足够
-    // （这玩意居然在 insert random 种毫无优势，但在 insert dup 却有明显性能提升，难以理解）
-    template <typename M>
-        requires(std::constructible_from<mapped_type, M>)
-    std::pair<iterator, bool> emplace_no_rehash(const key_type &key, M &&mapped) {
-        auto [index, inserted] = find_or_insert_kv_no_rehash(key, std::forward<M>(mapped));
-        return {iterator(this, index), inserted};
-    }
-
-    // 不检查键是否存在，直接插入
-    template <typename M>
-        requires(std::constructible_from<mapped_type, M>)
-    std::pair<iterator, bool> emplace_new(const key_type &key, M &&mapped) {
-        auto [index, inserted] = insert_kv(key, std::forward<M>(mapped));
-        return {iterator(this, index), inserted};
+    auto emplace(const key_type &key, M &&mapped) -> emplace_return_type<Policy> {
+        if constexpr (Policy::rehash) {
+            if (size_ >= growth_limit_) {
+                size_type existing = get_key_index(key);
+                if (existing != capacity_) return make_emplace_return_value<Policy>(existing, false);
+                double_storage();
+            }
+        }
+        size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
+#ifdef DEBUG
+        SizeT probe_len = 0;
+#endif
+        for (;;) {
+#ifdef DEBUG
+            ++probe_len;
+#endif
+            slot_type &slot = slots_[index];
+            key_type stored_key = slot.key;
+            if (stored_key == k_unoccupied) {
+                slot.key = key;
+                std::construct_at(values_ + index, std::piecewise_construct, std::forward_as_tuple(key),
+                                  std::forward_as_tuple(std::forward<M>(mapped)));
+                ++size_;
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return make_emplace_return_value<Policy>(index, true);
+            }
+            if constexpr (Policy::check_exist) {
+                if (stored_key == key) {
+#ifdef DEBUG
+                    record_probe(probe_len);
+#endif
+                    return make_emplace_return_value<Policy>(index, false);
+                }
+            }
+            index = (index + 1) & bucket_mask_;
+        }
     }
 
     template <typename... Args>
@@ -582,6 +647,19 @@ private:
 
     SizeT hash_key(const key_type &key) const noexcept { return hasher_(key); }
 
+    template <EmplacePolicy Policy>
+    auto make_emplace_return_value(size_type index, bool inserted) -> emplace_return_type<Policy> {
+        if constexpr (Policy::return_value) {
+            if constexpr (Policy::check_exist) {
+                return {iterator{this, index}, inserted};
+            } else {
+                return iterator{this, index};
+            }
+        } else {
+            return;
+        }
+    }
+
     // 如果要 find hit 快，先判断是否等于 key 再判是否为未占用
     // 如果要 find miss 快，则反过来
     // 当前这个版本，对于 find hit 最为友好，谨慎调整
@@ -645,150 +723,6 @@ private:
                 record_probe(probe_len);
 #endif
                 return index;
-            }
-            index = (index + 1) & bucket_mask_;
-        }
-    }
-
-    // 搭配默认 emplace 使用
-    template <typename M>
-        requires(std::constructible_from<mapped_type, M>)
-    std::pair<size_type, bool> find_or_insert_kv(const key_type &key, M &&mapped) {
-        if (size_ >= growth_limit_) {
-            size_type existing = get_key_index(key);
-            if (existing != capacity_) return {existing, false};
-            double_storage();
-        }
-        size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
-#ifdef DEBUG
-        SizeT probe_len = 0;
-#endif
-        for (;;) {
-#ifdef DEBUG
-            ++probe_len;
-#endif
-            slot_type &slot = slots_[index];
-            key_type stored_key = slot.key;
-            if (stored_key == k_unoccupied) {
-                slot.key = key;
-                std::construct_at(values_ + index, std::piecewise_construct, std::forward_as_tuple(key),
-                                  std::forward_as_tuple(std::forward<M>(mapped)));
-                ++size_;
-#ifdef DEBUG
-                record_probe(probe_len);
-#endif
-                return {index, true};
-            }
-            if (stored_key == key) {
-#ifdef DEBUG
-                record_probe(probe_len);
-#endif
-                return {index, false};
-            }
-            index = (index + 1) & bucket_mask_;
-        }
-    }
-
-    // 搭配 emplace noit 使用
-    template <typename M>
-        requires(std::constructible_from<mapped_type, M>)
-    void find_or_insert_kv_no_return(const key_type &key, M &&mapped) {
-        if (size_ >= growth_limit_) {
-            if (get_key_index(key) != capacity_) return;
-            double_storage();
-        }
-        size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
-#ifdef DEBUG
-        SizeT probe_len = 0;
-#endif
-        for (;;) {
-#ifdef DEBUG
-            ++probe_len;
-#endif
-            slot_type &slot = slots_[index];
-            key_type stored_key = slot.key;
-            if (stored_key == k_unoccupied) {
-                slot.key = key;
-                std::construct_at(values_ + index, std::piecewise_construct, std::forward_as_tuple(key),
-                                  std::forward_as_tuple(std::forward<M>(mapped)));
-                ++size_;
-#ifdef DEBUG
-                record_probe(probe_len);
-#endif
-                return;
-            }
-            if (stored_key == key) {
-#ifdef DEBUG
-                record_probe(probe_len);
-#endif
-                return;
-            }
-            index = (index + 1) & bucket_mask_;
-        }
-    }
-
-    // 搭配 emplace no rehash 使用
-    template <typename M>
-        requires(std::constructible_from<mapped_type, M>)
-    std::pair<size_type, bool> find_or_insert_kv_no_rehash(const key_type &key, M &&mapped) {
-        size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
-#ifdef DEBUG
-        SizeT probe_len = 0;
-#endif
-        for (;;) {
-#ifdef DEBUG
-            ++probe_len;
-#endif
-            slot_type &slot = slots_[index];
-            key_type stored_key = slot.key;
-            if (stored_key == k_unoccupied) {
-                slot.key = key;
-                std::construct_at(values_ + index, std::piecewise_construct, std::forward_as_tuple(key),
-                                  std::forward_as_tuple(std::forward<M>(mapped)));
-                ++size_;
-#ifdef DEBUG
-                record_probe(probe_len);
-#endif
-                return {index, true};
-            }
-            if (stored_key == key) {
-#ifdef DEBUG
-                record_probe(probe_len);
-#endif
-                return {index, false};
-            }
-            index = (index + 1) & bucket_mask_;
-        }
-    }
-
-    // 搭配 emplace new 使用
-    template <typename M>
-        requires(std::constructible_from<mapped_type, M>)
-    std::pair<size_type, bool> insert_kv(const key_type &key, M &&mapped) {
-        if (size_ >= growth_limit_) {
-            size_type existing = get_key_index(key);
-            if (existing != capacity_) return {existing, false};
-            double_storage();
-        }
-        size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
-#ifdef DEBUG
-        SizeT probe_len = 0;
-#endif
-        for (;;) {
-#ifdef DEBUG
-            ++probe_len;
-#endif
-            slot_type &slot = slots_[index];
-            key_type stored_key = slot.key;
-            if (stored_key == k_unoccupied) {
-                slot.key = key;
-                std::construct_at(values_ + index, std::piecewise_construct, std::forward_as_tuple(key),
-                                  std::forward_as_tuple(std::forward<M>(mapped)));
-                ++size_;
-#ifdef DEBUG
-                record_probe(probe_len);
-#endif
-                return {index, true};
             }
             index = (index + 1) & bucket_mask_;
         }
@@ -974,7 +908,7 @@ private:
         --size_;
     }
 
-    friend bool operator==(const flat_hash_map_u32_soa &lhs, const flat_hash_map_u32_soa &rhs) {
+    friend bool operator==(const flat_hash_map_u32 &lhs, const flat_hash_map_u32 &rhs) {
         if (&lhs == &rhs) return true;
         if (lhs.size_ != rhs.size_) return false;
         if (lhs.size_ == 0) return true;
@@ -991,7 +925,7 @@ private:
         return true;
     }
 
-    friend void swap(flat_hash_map_u32_soa &lhs, flat_hash_map_u32_soa &rhs) noexcept(noexcept(lhs.swap(rhs))) {
+    friend void swap(flat_hash_map_u32 &lhs, flat_hash_map_u32 &rhs) noexcept(noexcept(lhs.swap(rhs))) {
         lhs.swap(rhs);
     }
 }; // flat hash map uint32

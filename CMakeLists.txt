@@ -56,56 +56,91 @@ add_executable(s_flat_hash_map_u32_basic
 # =====================================================
 #                     Target 2: Benchmarks
 # =====================================================
-add_executable(s_flat_hash_map_bench_emplace_default
-    s_flat_hash_map/bench/s_flat_hash_map_bench_emplace_default.cpp
+add_executable(bench_vs_std
+    s_flat_hash_map/bench/bench_vs_std.cpp
 )
 
-add_executable(bench_default_and_noit
-    s_flat_hash_map/bench/bench_default_and_noit.cpp
+add_executable(bench_default_vs_no_ret
+    s_flat_hash_map/bench/bench_default_vs_no_ret.cpp
 )
 
-add_executable(bench_default_and_no_rehash
-    s_flat_hash_map/bench/bench_default_and_no_rehash.cpp
+add_executable(bench_default_vs_no_rehash
+    s_flat_hash_map/bench/bench_default_vs_no_rehash.cpp
 )
 
-target_compile_definitions(s_flat_hash_map_bench_emplace_default PRIVATE BENCHMARK_STATIC_DEFINE)
-target_compile_options(s_flat_hash_map_bench_emplace_default PRIVATE
+add_executable(bench_default_vs_no_check_dup
+    s_flat_hash_map/bench/bench_default_vs_no_check_dup.cpp
+)
+
+add_executable(bench_default_vs_fast
+    s_flat_hash_map/bench/bench_default_vs_fast.cpp
+)
+
+target_compile_definitions(bench_vs_std PRIVATE BENCHMARK_STATIC_DEFINE)
+target_compile_options(bench_vs_std PRIVATE
     -Wno-used-but-marked-unused
     -Wno-switch-default
     -Wno-unneeded-internal-declaration
     -Wno-unused-template
 )
 
-target_compile_definitions(bench_default_and_noit PRIVATE BENCHMARK_STATIC_DEFINE)
-target_compile_options(bench_default_and_noit PRIVATE
+target_compile_definitions(bench_default_vs_no_ret PRIVATE BENCHMARK_STATIC_DEFINE)
+target_compile_options(bench_default_vs_no_ret PRIVATE
     -Wno-used-but-marked-unused
     -Wno-switch-default
     -Wno-unneeded-internal-declaration
     -Wno-unused-template
 )
 
-target_compile_definitions(bench_default_and_no_rehash PRIVATE BENCHMARK_STATIC_DEFINE)
-target_compile_options(bench_default_and_no_rehash PRIVATE
+target_compile_definitions(bench_default_vs_no_rehash PRIVATE BENCHMARK_STATIC_DEFINE)
+target_compile_options(bench_default_vs_no_rehash PRIVATE
     -Wno-used-but-marked-unused
     -Wno-switch-default
     -Wno-unneeded-internal-declaration
     -Wno-unused-template
 )
 
+target_compile_definitions(bench_default_vs_no_check_dup PRIVATE BENCHMARK_STATIC_DEFINE)
+target_compile_options(bench_default_vs_no_check_dup PRIVATE
+    -Wno-used-but-marked-unused
+    -Wno-switch-default
+    -Wno-unneeded-internal-declaration
+    -Wno-unused-template
+)
 
-target_link_libraries(s_flat_hash_map_bench_emplace_default PRIVATE
+target_compile_definitions(bench_default_vs_fast PRIVATE BENCHMARK_STATIC_DEFINE)
+target_compile_options(bench_default_vs_fast PRIVATE
+    -Wno-used-but-marked-unused
+    -Wno-switch-default
+    -Wno-unneeded-internal-declaration
+    -Wno-unused-template
+)
+
+target_link_libraries(bench_vs_std PRIVATE
     benchmark
     benchmark_main
     shlwapi
 )
 
-target_link_libraries(bench_default_and_noit PRIVATE
+target_link_libraries(bench_default_vs_no_ret PRIVATE
     benchmark
     benchmark_main
     shlwapi
 )
 
-target_link_libraries(bench_default_and_no_rehash PRIVATE
+target_link_libraries(bench_default_vs_no_rehash PRIVATE
+    benchmark
+    benchmark_main
+    shlwapi
+)
+
+target_link_libraries(bench_default_vs_no_check_dup PRIVATE
+    benchmark
+    benchmark_main
+    shlwapi
+)
+
+target_link_libraries(bench_default_vs_fast PRIVATE
     benchmark
     benchmark_main
     shlwapi

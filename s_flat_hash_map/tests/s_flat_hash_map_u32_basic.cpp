@@ -52,110 +52,113 @@ template <typename T> struct CountingAllocator {
 };
 
 static void test_basic_operations() {
-    using map_t = mcl::flat_hash_map_u32_soa<UInt32>;
-
-    map_t m;
-    assert(m.empty()); // 初始建表为空
-    assert(m.size() == 0);
-    // assert(m.capacity() == 0); // 延迟分配
-    assert(m.capacity() == 8); // 直接分配 8
-
-    // insert / find
-    auto [it1, inserted1] = m.emplace(1u, 10u);
-    assert(inserted1);
-    assert(m.size() == 1);
-    assert(it1->first == 1u && it1->second == 10u);
-
-    auto it_found = m.find(1u);
-    assert(it_found != m.end());
-    assert(it_found->second == 10u);
-    assert(m.at(1u) == 10u);
-
-    // insert duplicate key
-    auto [it2, inserted2] = m.emplace(1u, 20u);
-    assert(!inserted2);
-    assert(m.size() == 1);
-    assert(it2->second == 10u); // emplace 不覆盖
-
-    // operator[]
-    m[2u] = 200u;
-    assert(m.size() == 2);
-    assert(m.at(2u) == 200u);
-    assert(m.capacity() == 8);
-
-    m[2u] = 300u;
-    assert(m.size() == 2);
-    assert(m.at(2u) == 300u);
-    assert(m.capacity() == 8);
-
-    UInt32 &ref3 = m[3u];
-    assert(ref3 == 0u); // mapped_type{}
-    ref3 = 300u;
-    assert(m.at(3u) == 300u);
-    assert(m.size() == 3);
-    assert(m.capacity() == 8);
-
-    // insert or assign
-    auto [it3, inserted3] = m.insert_or_assign(2u, 222u);
-    assert(!inserted3);
-    assert(it3->second == 222u);
-    assert(m.at(2u) == 222u);
-
-    auto [it4, inserted4] = m.insert_or_assign(4u, 444u);
-    assert(inserted4);
-    assert(m.at(4u) == 444u);
-    assert(m.size() == 4);
-    assert(m.capacity() == 8);
-
-    // at 异常
-    bool threw = false;
-    try {
-        m.at(999u);
-    } catch (const std::out_of_range &) { threw = true; }
-    assert(threw);
-    assert(m.size() == 4);
-    assert(m.capacity() == 8);
-
-    // erase by key
-    SizeT erased = m.erase(2u);
-    assert(erased == 1);
-    assert(!m.contains(2u));
-    assert(m.size() == 3);
-    assert(m.capacity() == 8);
-
-    // clear / 再插入
-    m.clear();
-    assert(m.empty());
-    assert(m.size() == 0);
-    assert(m.capacity() == 8);
-
-    auto [it5, inserted5] = m.emplace(42u, 4242u);
-    assert(inserted5);
-    assert(m.size() == 1);
-    assert(m.at(42u) == 4242u);
-    assert(m.capacity() == 8);
-
-    m.clear();
-    assert(m.size() == 0);
-    m.rehash(0);
-    assert(m.size() == 0);
-    assert(m.capacity() == 0);
-    m.reserve(1);
-    assert(m.capacity() == 8);
-
-    // try_emplace
-    auto [te_it1, te_inserted1] = m.try_emplace(5u, 555u);
-    assert(te_inserted1);
-    assert(te_it1->second == 555u);
-
-    auto [te_it2, te_inserted2] = m.try_emplace(5u, 777u);
-    assert(!te_inserted2);
-    assert(te_it1->second == 555u);
-    assert(m.size() == 1);
-    assert(m.capacity() == 8);
+    using map_t = mcl::flat_hash_map_u32<UInt32>;
 
     {
-        using move_map_t = mcl::flat_hash_map_u32_soa<std::unique_ptr<UInt32>>;
+        map_t m;
+        assert(m.empty()); // 初始建表为空
+        assert(m.size() == 0);
+        // assert(m.capacity() == 0); // 延迟分配
+        assert(m.capacity() == 8); // 直接分配 8
+
+        // insert / find
+        auto [it1, inserted1] = m.emplace(1u, 10u);
+        assert(inserted1);
+        assert(m.size() == 1);
+        assert(it1->first == 1u && it1->second == 10u);
+
+        auto it_found = m.find(1u);
+        assert(it_found != m.end());
+        assert(it_found->second == 10u);
+        assert(m.at(1u) == 10u);
+
+        // insert duplicate key
+        auto [it2, inserted2] = m.emplace(1u, 20u);
+        assert(!inserted2);
+        assert(m.size() == 1);
+        assert(it2->second == 10u); // emplace 不覆盖
+
+        // operator[]
+        m[2u] = 200u;
+        assert(m.size() == 2);
+        assert(m.at(2u) == 200u);
+        assert(m.capacity() == 8);
+
+        m[2u] = 300u;
+        assert(m.size() == 2);
+        assert(m.at(2u) == 300u);
+        assert(m.capacity() == 8);
+
+        UInt32 &ref3 = m[3u];
+        assert(ref3 == 0u); // mapped_type{}
+        ref3 = 300u;
+        assert(m.at(3u) == 300u);
+        assert(m.size() == 3);
+        assert(m.capacity() == 8);
+
+        // insert or assign
+        auto [it3, inserted3] = m.insert_or_assign(2u, 222u);
+        assert(!inserted3);
+        assert(it3->second == 222u);
+        assert(m.at(2u) == 222u);
+
+        auto [it4, inserted4] = m.insert_or_assign(4u, 444u);
+        assert(inserted4);
+        assert(m.at(4u) == 444u);
+        assert(m.size() == 4);
+        assert(m.capacity() == 8);
+
+        // at 异常
+        bool threw = false;
+        try {
+            m.at(999u);
+        } catch (const std::out_of_range &) { threw = true; }
+        assert(threw);
+        assert(m.size() == 4);
+        assert(m.capacity() == 8);
+
+        // erase by key
+        SizeT erased = m.erase(2u);
+        assert(erased == 1);
+        assert(!m.contains(2u));
+        assert(m.size() == 3);
+        assert(m.capacity() == 8);
+
+        // clear / 再插入
+        m.clear();
+        assert(m.empty());
+        assert(m.size() == 0);
+        assert(m.capacity() == 8);
+
+        auto [it5, inserted5] = m.emplace(42u, 4242u);
+        assert(inserted5);
+        assert(m.size() == 1);
+        assert(m.at(42u) == 4242u);
+        assert(m.capacity() == 8);
+
+        m.clear();
+        assert(m.size() == 0);
+        m.rehash(0);
+        assert(m.size() == 0);
+        assert(m.capacity() == 0);
+        m.reserve(1);
+        assert(m.capacity() == 8);
+
+        // try_emplace
+        auto [te_it1, te_inserted1] = m.try_emplace(5u, 555u);
+        assert(te_inserted1);
+        assert(te_it1->second == 555u);
+
+        auto [te_it2, te_inserted2] = m.try_emplace(5u, 777u);
+        assert(!te_inserted2);
+        assert(te_it1->second == 555u);
+        assert(m.size() == 1);
+        assert(m.capacity() == 8);
+    }
+
+    // move 行为
+    {
+        using move_map_t = mcl::flat_hash_map_u32<std::unique_ptr<UInt32>>;
         move_map_t mm;
         auto up = std::make_unique<UInt32>(99);
         auto [mit, minserted] = mm.try_emplace(1u, std::move(up));
@@ -181,20 +184,20 @@ static void test_basic_operations() {
         assert(m2.capacity() == 8);
     }
 
-    // emplace noit
+    // emplace no return
     {
         map_t m3;
-        m3.emplace_noit(1, 12);
+        m3.emplace<mcl::no_return>(1, 12);
         assert(m3.size() == 1);
         assert(m3.capacity() == 8);
         assert(m3.contains(1));
         assert(m3.find(1) != m3.end());
-        m3.emplace_noit(1, 23);
+        m3.emplace<mcl::no_return>(1, 23);
         assert(m3.size() == 1);
 
         m3.max_load_factor(0.5);
         for (UInt32 i = 2; i < 6; ++i) {
-            m3.emplace_noit(i, i * 10);
+            m3.emplace<mcl::no_return>(i, i * 10);
             assert(m3.contains(i));
             assert(m3.find(i) != m3.end());
             auto [it, inserted] = m3.emplace(i, i * 20);
@@ -215,15 +218,15 @@ static void test_basic_operations() {
         map_t m4;
         m4.reserve(64);
         assert(m4.capacity() == 128);
-        m4.emplace_no_rehash(1, 12);
+        m4.emplace<mcl::no_rehash>(1, 12);
         assert(m4.size() == 1);
         assert(m4.contains(1));
         assert(m4.find(1) != m4.end());
-        m4.emplace_no_rehash(1, 23);
+        m4.emplace<mcl::no_rehash>(1, 23);
         assert(m4.size() == 1);
 
         for (UInt32 i = 2; i < 6; ++i) {
-            m4.emplace_no_rehash(i, i * 10);
+            m4.emplace<mcl::no_rehash>(i, i * 10);
             assert(m4.contains(i));
             assert(m4.find(i) != m4.end());
             auto [it, inserted] = m4.emplace(i, i * 20);
@@ -238,10 +241,39 @@ static void test_basic_operations() {
         assert(m4.contains(4));
         assert(m4.contains(5));
     }
+
+    // emplace new
+    {
+        map_t m5;
+        m5.reserve(64);
+        assert(m5.capacity() == 128);
+        m5.emplace<mcl::no_check_dup>(1, 12);
+        assert(m5.size() == 1);
+        assert(m5.contains(1));
+        assert(m5.find(1) != m5.end());
+        m5.emplace(1, 23);
+        assert(m5.size() == 1);
+
+        for (UInt32 i = 2; i < 6; ++i) {
+            m5.emplace<mcl::no_check_dup>(i, i * 10);
+            assert(m5.contains(i));
+            assert(m5.find(i) != m5.end());
+            auto [it, inserted] = m5.emplace(i, i * 20);
+            assert(it->second = i * 10);
+            assert(!inserted);
+        }
+        assert(m5.size() == 5);
+        assert(m5.capacity() == 128);
+        m5.erase(3);
+        assert(m5.contains(2));
+        assert(!m5.contains(3));
+        assert(m5.contains(4));
+        assert(m5.contains(5));
+    }
 }
 
 static void test_insert_range_and_init_list() {
-    using map_t = mcl::flat_hash_map_u32_soa<UInt32>;
+    using map_t = mcl::flat_hash_map_u32<UInt32>;
     map_t m;
 
     std::vector<map_t::value_type> src = {{1u, 10u}, {2u, 20u}, {2u, 200u}};
@@ -257,7 +289,7 @@ static void test_insert_range_and_init_list() {
 }
 
 static void test_shrink_to_fit() {
-    using map_t = mcl::flat_hash_map_u32_soa<UInt32>;
+    using map_t = mcl::flat_hash_map_u32<UInt32>;
 
     map_t m;
     m.emplace(1u, 1u);
@@ -296,7 +328,7 @@ static void test_shrink_to_fit() {
 }
 
 static void test_high_collision() {
-    using map_t = mcl::flat_hash_map_u32_soa<UInt32, bad_hash_u32>;
+    using map_t = mcl::flat_hash_map_u32<UInt32, bad_hash_u32>;
     map_t m;
     constexpr SizeT N = 128;
     for (UInt32 i = 0; i < N; ++i) {
@@ -329,7 +361,7 @@ static void test_high_collision() {
 }
 
 static void test_load_factor_and_rehash() {
-    using map_t = mcl::flat_hash_map_u32_soa<UInt32>;
+    using map_t = mcl::flat_hash_map_u32<UInt32>;
     map_t m;
     m.max_load_factor(0.5f);
     m.reserve(8);
@@ -353,7 +385,7 @@ static void test_load_factor_and_rehash() {
 }
 
 static void test_insert_erase_insert_cycle() {
-    using map_t = mcl::flat_hash_map_u32_soa<UInt32>;
+    using map_t = mcl::flat_hash_map_u32<UInt32>;
 
     map_t m;
     m.max_load_factor(0.75f);
@@ -383,7 +415,7 @@ static void test_insert_erase_insert_cycle() {
 }
 
 static void test_iterators() {
-    using map_t = mcl::flat_hash_map_u32_soa<UInt32>;
+    using map_t = mcl::flat_hash_map_u32<UInt32>;
 
     map_t m;
 
@@ -406,7 +438,7 @@ static void test_iterators() {
 
 static void test_allocator_behavior() {
     using value_type = std::pair<UInt32, UInt32>;
-    using map_t = mcl::flat_hash_map_u32_soa<UInt32, mcl::detail::FastUInt32Hash, CountingAllocator<value_type>>;
+    using map_t = mcl::flat_hash_map_u32<UInt32, mcl::detail::FastUInt32Hash, CountingAllocator<value_type>>;
 
     AllocStats::reset();
     {
@@ -431,7 +463,7 @@ static void test_allocator_behavior() {
 }
 
 int main() {
-    std::cout << "[flat_hash_map_u32_soa] basic tests running...\n";
+    std::cout << "[flat_hash_map_u32] basic tests running...\n";
 
     test_basic_operations();
     std::cout << "  basic_operations OK\n";
