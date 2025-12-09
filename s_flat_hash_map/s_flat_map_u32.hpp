@@ -336,6 +336,7 @@ public:
     bool empty() const noexcept { return size_ == 0; }
     size_type size() const noexcept { return size_; }
     size_type capacity() const noexcept { return capacity_; }
+    size_type growth_limit() const noexcept { return growth_limit_; }
     float load_factor() const noexcept {
         if (capacity_ == 0) return 0.0f;
         return static_cast<float>(size_) / static_cast<float>(capacity_);
@@ -513,19 +514,92 @@ public:
 
     mapped_type &operator[](const key_type &key) {
         // 不检查是否插入哨兵值
-        size_type index = find_or_insert_default(key);
-        return values_[index].second;
+        if (size_ >= growth_limit_) { // 临界元素
+            size_type existing = index_of(key);
+            if (existing != capacity_) return values_[existing].second;
+            double_storage();
+        }
+#ifdef DEBUG
+        SizeT probe_len = 0;
+#endif
+        for (size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;;
+             index = (index + 1) & bucket_mask_) {
+#ifdef DEBUG
+            ++probe_len;
+#endif
+            slot_type &slot = slots_[index];
+            key_type stored_key = slot.key;
+            if (stored_key == k_unoccupied) {
+                slot.key = key;
+                std::construct_at(values_ + index, std::piecewise_construct, std::forward_as_tuple(key),
+                                  std::forward_as_tuple());
+                ++size_;
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return values_[index].second;
+            }
+            if (stored_key == key) {
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return values_[index].second;
+            }
+        }
     }
 
-    std::pair<iterator, bool> insert(const value_type &kv) { return emplace(kv.first, kv.second); }
+    template <InsertPolicy Policy = default_policy> auto insert(const value_type &kv) -> insert_return_type<Policy> {
+        return emplace<Policy>(kv.first, kv.second);
+    }
 
-    std::pair<iterator, bool> insert(value_type &&kv) { return emplace(kv.first, std::move(kv.second)); }
+    template <InsertPolicy Policy = default_policy> auto insert(value_type &&kv) -> insert_return_type<Policy> {
+        return emplace<Policy>(kv.first, std::move(kv.second));
+    }
 
-    template <typename M>
+    template <InsertPolicy Policy = default_policy, typename M>
         requires(std::constructible_from<mapped_type, M>)
-    std::pair<iterator, bool> insert_or_assign(const key_type &key, M &&mapped) {
-        auto [index, inserted] = find_and_insert_or_assign(key, std::forward<M>(mapped));
-        return {iterator(this, index), inserted};
+    auto insert_or_assign(const key_type &key, M &&mapped) -> insert_return_type<Policy> {
+        if constexpr (Policy::rehash) {
+            if (size_ >= growth_limit_) {
+                size_type existing = index_of(key);
+                if (existing != capacity_) {
+                    values_[existing].second = std::forward<M>(mapped);
+                    return make_result<Policy>(existing, false);
+                }
+                double_storage();
+            }
+        }
+#ifdef DEBUG
+        SizeT probe_len = 0;
+#endif
+        for (size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;;
+             index = (index + 1) & bucket_mask_) {
+#ifdef DEBUG
+            ++probe_len;
+#endif
+            slot_type &slot = slots_[index];
+            key_type stored_key = slot.key;
+            if (stored_key == k_unoccupied) {
+                slot.key = key;
+                std::construct_at(values_ + index, std::piecewise_construct, std::forward_as_tuple(key),
+                                  std::forward_as_tuple(std::forward<M>(mapped)));
+                ++size_;
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return make_result<Policy>(index, true);
+            }
+            // 虽然调用 insert or assign 的不至于关掉 check dup，但这里保持一致性，反正也没坏处
+            if constexpr (Policy::check_dup) {
+                if (stored_key == key) {
+                    values_[index].second = std::forward<M>(mapped);
+#ifdef DEBUG
+                    record_probe(probe_len);
+#endif
+                    return make_result<Policy>(index, false);
+                }
+            }
+        }
     }
 
     template <InsertPolicy Policy = default_policy, typename M>
@@ -538,11 +612,11 @@ public:
                 double_storage();
             }
         }
-        size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
-        for (;;) {
+        for (size_type index = static_cast<size_type>(hash_of(key) & bucket_mask_);;
+             index = (index + 1) & bucket_mask_) {
 #ifdef DEBUG
             ++probe_len;
 #endif
@@ -566,7 +640,6 @@ public:
                     return make_result<Policy>(index, false);
                 }
             }
-            index = (index + 1) & bucket_mask_;
         }
     }
 
@@ -580,11 +653,11 @@ public:
                 double_storage();
             }
         }
-        size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
-        for (;;) {
+        for (size_type index = static_cast<size_type>(hash_of(key) & bucket_mask_);;
+             index = (index + 1) & bucket_mask_) {
 #ifdef DEBUG
             ++probe_len;
 #endif
@@ -608,7 +681,6 @@ public:
                     return make_result<Policy>(index, false);
                 }
             }
-            index = (index + 1) & bucket_mask_;
         }
     }
 
@@ -719,84 +791,6 @@ private:
                 record_probe(probe_len);
 #endif
                 return capacity_; // 用 capacity_ 代替 npos，减少外部分支
-            }
-            index = (index + 1) & bucket_mask_;
-        }
-    }
-
-    size_type find_or_insert_default(const key_type &key) {
-        if (size_ >= growth_limit_) { // 临界元素
-            size_type existing = index_of(key);
-            if (existing != capacity_) return existing;
-            double_storage();
-        }
-        size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;
-#ifdef DEBUG
-        SizeT probe_len = 0;
-#endif
-        for (;;) {
-#ifdef DEBUG
-            ++probe_len;
-#endif
-            slot_type &slot = slots_[index];
-            key_type stored_key = slot.key;
-            if (stored_key == k_unoccupied) {
-                slot.key = key;
-                std::construct_at(values_ + index, std::piecewise_construct, std::forward_as_tuple(key),
-                                  std::forward_as_tuple());
-                ++size_;
-#ifdef DEBUG
-                record_probe(probe_len);
-#endif
-                return index;
-            }
-            if (stored_key == key) {
-#ifdef DEBUG
-                record_probe(probe_len);
-#endif
-                return index;
-            }
-            index = (index + 1) & bucket_mask_;
-        }
-    }
-
-    template <typename M>
-        requires(std::constructible_from<mapped_type, M>)
-    std::pair<size_type, bool> find_and_insert_or_assign(const key_type &key, M &&mapped) {
-        if (size_ >= growth_limit_) {
-            size_type existing = index_of(key);
-            if (existing != capacity_) {
-                values_[existing].second = std::forward<M>(mapped);
-                return {existing, false};
-            }
-            double_storage();
-        }
-        size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;
-#ifdef DEBUG
-        SizeT probe_len = 0;
-#endif
-        for (;;) {
-#ifdef DEBUG
-            ++probe_len;
-#endif
-            slot_type &slot = slots_[index];
-            key_type stored_key = slot.key;
-            if (stored_key == k_unoccupied) {
-                slot.key = key;
-                std::construct_at(values_ + index, std::piecewise_construct, std::forward_as_tuple(key),
-                                  std::forward_as_tuple(std::forward<M>(mapped)));
-                ++size_;
-#ifdef DEBUG
-                record_probe(probe_len);
-#endif
-                return {index, true};
-            }
-            if (stored_key == key) {
-                values_[index].second = std::forward<M>(mapped);
-#ifdef DEBUG
-                record_probe(probe_len);
-#endif
-                return {index, false};
             }
             index = (index + 1) & bucket_mask_;
         }
