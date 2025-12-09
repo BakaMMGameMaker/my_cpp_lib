@@ -8,44 +8,44 @@
 namespace mcl {
 
 template <typename P>
-concept EmplacePolicy = requires {
+concept InsertPolicy = requires {
     { P::return_value } -> std::convertible_to<bool>; // 是否返回值
     { P::rehash } -> std::convertible_to<bool>;       // 是否触发扩容
-    { P::check_exist } -> std::convertible_to<bool>;  // 是否检查重复键
+    { P::check_dup } -> std::convertible_to<bool>;    // 是否检查重复键
 };
 
-struct default_emplace_policy {
+struct default_policy {
     static constexpr bool return_value = true;
     static constexpr bool rehash = true;
-    static constexpr bool check_exist = true;
+    static constexpr bool check_dup = true;
 };
 
 // 不返回值
 struct no_return {
     static constexpr bool return_value = false;
     static constexpr bool rehash = true;
-    static constexpr bool check_exist = true;
+    static constexpr bool check_dup = true;
 };
 
 // 不扩容
 struct no_rehash {
     static constexpr bool return_value = true;
     static constexpr bool rehash = false;
-    static constexpr bool check_exist = true;
+    static constexpr bool check_dup = true;
 };
 
 // 不查重
 struct no_check_dup {
     static constexpr bool return_value = true;
     static constexpr bool rehash = true;
-    static constexpr bool check_exist = false;
+    static constexpr bool check_dup = false;
 };
 
 // 仅插入元素
 struct fast {
     static constexpr bool return_value = false;
     static constexpr bool rehash = false;
-    static constexpr bool check_exist = false;
+    static constexpr bool check_dup = false;
 };
 
 template <typename MappedType, typename HasherType = detail::FastUInt32Hash,
@@ -200,16 +200,16 @@ public:
 private:
     // return type alias
     // emplace 返回类型
-    template <EmplacePolicy Policy>
-    using emplace_return_type =
+    template <InsertPolicy Policy>
+    using insert_return_type =
         std::conditional_t<Policy::return_value,
-                           std::conditional_t<Policy::check_exist, std::pair<iterator, bool>, iterator>, void>;
+                           std::conditional_t<Policy::check_dup, std::pair<iterator, bool>, iterator>, void>;
 
     // find or insert kv 返回类型
-    template <EmplacePolicy Policy>
+    template <InsertPolicy Policy>
     using find_or_insert_kv_return_type =
         std::conditional_t<Policy::return_value,
-                           std::conditional_t<Policy::check_exist, std::pair<size_type, bool>, size_type>, void>;
+                           std::conditional_t<Policy::check_dup, std::pair<size_type, bool>, size_type>, void>;
 
 public:
     explicit flat_hash_map_u32(size_type init_size = 1, const Alloc &alloc = Alloc{})
@@ -493,11 +493,11 @@ public:
     const_iterator cend() const noexcept { return const_iterator(this, capacity_); }
 
     // 不检查是否在查找哨兵值
-    iterator find(const key_type &key) noexcept { return iterator(this, get_key_index(key)); }
+    iterator find(const key_type &key) noexcept { return iterator(this, index_of(key)); }
 
-    const_iterator find(const key_type &key) const noexcept { return const_iterator(this, get_key_index(key)); }
+    const_iterator find(const key_type &key) const noexcept { return const_iterator(this, index_of(key)); }
 
-    bool contains(const key_type &key) const noexcept { return get_key_index(key) != capacity_; }
+    bool contains(const key_type &key) const noexcept { return index_of(key) != capacity_; }
 
     mapped_type &at(const key_type &key) {
         auto it = find(key);
@@ -528,17 +528,17 @@ public:
         return {iterator(this, index), inserted};
     }
 
-    template <EmplacePolicy Policy = default_emplace_policy, typename M>
+    template <InsertPolicy Policy = default_policy, typename M>
         requires(std::constructible_from<mapped_type, M>)
-    auto emplace(const key_type &key, M &&mapped) -> emplace_return_type<Policy> {
+    auto emplace(const key_type &key, M &&mapped) -> insert_return_type<Policy> {
         if constexpr (Policy::rehash) {
             if (size_ >= growth_limit_) {
-                size_type existing = get_key_index(key);
-                if (existing != capacity_) return make_emplace_return_value<Policy>(existing, false);
+                size_type existing = index_of(key);
+                if (existing != capacity_) return make_result<Policy>(existing, false);
                 double_storage();
             }
         }
-        size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
+        size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
@@ -556,25 +556,60 @@ public:
 #ifdef DEBUG
                 record_probe(probe_len);
 #endif
-                return make_emplace_return_value<Policy>(index, true);
+                return make_result<Policy>(index, true);
             }
-            if constexpr (Policy::check_exist) {
+            if constexpr (Policy::check_dup) {
                 if (stored_key == key) {
 #ifdef DEBUG
                     record_probe(probe_len);
 #endif
-                    return make_emplace_return_value<Policy>(index, false);
+                    return make_result<Policy>(index, false);
                 }
             }
             index = (index + 1) & bucket_mask_;
         }
     }
 
-    template <typename... Args>
+    template <InsertPolicy Policy = default_policy, typename... Args>
         requires(std::constructible_from<mapped_type, Args...>)
-    std::pair<iterator, bool> try_emplace(const key_type &key, Args &&...args) {
-        auto [index, inserted] = find_or_try_emplace(key, std::forward<Args>(args)...);
-        return {iterator(this, index), inserted};
+    auto try_emplace(const key_type &key, Args &&...args) -> insert_return_type<Policy> {
+        if constexpr (Policy::rehash) {
+            if (size_ >= growth_limit_) {
+                size_type existing = index_of(key);
+                if (existing != capacity_) return make_result<Policy>(existing, false);
+                double_storage();
+            }
+        }
+        size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;
+#ifdef DEBUG
+        SizeT probe_len = 0;
+#endif
+        for (;;) {
+#ifdef DEBUG
+            ++probe_len;
+#endif
+            slot_type &slot = slots_[index];
+            key_type stored_key = slot.key;
+            if (stored_key == k_unoccupied) {
+                slot.key = key;
+                std::construct_at(values_ + index, std::piecewise_construct, std::forward_as_tuple(key),
+                                  std::forward_as_tuple(std::forward<Args>(args)...));
+                ++size_;
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return make_result<Policy>(index, true);
+            }
+            if constexpr (Policy::check_dup) {
+                if (stored_key == key) {
+#ifdef DEBUG
+                    record_probe(probe_len);
+#endif
+                    return make_result<Policy>(index, false);
+                }
+            }
+            index = (index + 1) & bucket_mask_;
+        }
     }
 
     template <std::input_iterator InputIt>
@@ -586,7 +621,7 @@ public:
     void insert(std::initializer_list<value_type> init) { insert(init.begin(), init.end()); }
 
     size_type erase(const key_type &key) {
-        size_type index = get_key_index(key);
+        size_type index = index_of(key);
         if (index == capacity_) return 0;
         erase_at_index(index);
         return 1;
@@ -645,12 +680,11 @@ private:
     }
 #endif
 
-    SizeT hash_key(const key_type &key) const noexcept { return hasher_(key); }
+    SizeT hash_of(const key_type &key) const noexcept { return hasher_(key); }
 
-    template <EmplacePolicy Policy>
-    auto make_emplace_return_value(size_type index, bool inserted) -> emplace_return_type<Policy> {
+    template <InsertPolicy Policy> auto make_result(size_type index, bool inserted) -> insert_return_type<Policy> {
         if constexpr (Policy::return_value) {
-            if constexpr (Policy::check_exist) {
+            if constexpr (Policy::check_dup) {
                 return {iterator{this, index}, inserted};
             } else {
                 return iterator{this, index};
@@ -664,9 +698,8 @@ private:
     // 如果要 find miss 快，则反过来
     // 当前这个版本，对于 find hit 最为友好，谨慎调整
     // 返回 capacity_ 代替 npos，减少外部分支
-    size_type get_key_index(const key_type &key) const noexcept {
-        size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
-        // 注意，乐观预测很可能是不必要的，会让编译器觉得这是小聪明，且降低分支预测成功率
+    size_type index_of(const key_type &key) const noexcept {
+        size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
@@ -691,14 +724,13 @@ private:
         }
     }
 
-    // TODO: no return type 版本 以及 uncheck 版本
     size_type find_or_insert_default(const key_type &key) {
         if (size_ >= growth_limit_) { // 临界元素
-            size_type existing = get_key_index(key);
+            size_type existing = index_of(key);
             if (existing != capacity_) return existing;
             double_storage();
         }
-        size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
+        size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
@@ -732,14 +764,14 @@ private:
         requires(std::constructible_from<mapped_type, M>)
     std::pair<size_type, bool> find_and_insert_or_assign(const key_type &key, M &&mapped) {
         if (size_ >= growth_limit_) {
-            size_type existing = get_key_index(key);
+            size_type existing = index_of(key);
             if (existing != capacity_) {
                 values_[existing].second = std::forward<M>(mapped);
                 return {existing, false};
             }
             double_storage();
         }
-        size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
+        size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
@@ -761,44 +793,6 @@ private:
             }
             if (stored_key == key) {
                 values_[index].second = std::forward<M>(mapped);
-#ifdef DEBUG
-                record_probe(probe_len);
-#endif
-                return {index, false};
-            }
-            index = (index + 1) & bucket_mask_;
-        }
-    }
-
-    template <typename... Args>
-        requires(std::constructible_from<mapped_type, Args...>)
-    std::pair<size_type, bool> find_or_try_emplace(const key_type &key, Args &&...args) {
-        if (size_ >= growth_limit_) {
-            size_type existing = get_key_index(key);
-            if (existing != capacity_) return {existing, false};
-            double_storage();
-        }
-        size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
-#ifdef DEBUG
-        SizeT probe_len = 0;
-#endif
-        for (;;) {
-#ifdef DEBUG
-            ++probe_len;
-#endif
-            slot_type &slot = slots_[index];
-            key_type stored_key = slot.key;
-            if (stored_key == k_unoccupied) {
-                slot.key = key;
-                std::construct_at(values_ + index, std::piecewise_construct, std::forward_as_tuple(key),
-                                  std::forward_as_tuple(std::forward<Args>(args)...));
-                ++size_;
-#ifdef DEBUG
-                record_probe(probe_len);
-#endif
-                return {index, true};
-            }
-            if (stored_key == key) {
 #ifdef DEBUG
                 record_probe(probe_len);
 #endif
@@ -868,7 +862,7 @@ private:
     }
 
     size_type find_insert_index_for_rehash(const key_type &key) {
-        size_type index = static_cast<size_type>(hash_key(key)) & bucket_mask_;
+        size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
@@ -895,7 +889,7 @@ private:
             key_type next_key = next_slot.key;
             if (next_key == k_unoccupied) break; // 遇到 EMPTY
 
-            SizeT next_hash = hash_key(next_key);
+            SizeT next_hash = hash_of(next_key);
             size_type home = static_cast<size_type>(next_hash) & bucket_mask_;
             if (home == next) break; // 下一个元素在自己家上，不要左移
 
@@ -918,7 +912,7 @@ private:
             if (stored_key == k_unoccupied) continue;
 
             const value_type &kv = lhs.values_[index];
-            size_type result = rhs.get_key_index(kv.first);
+            size_type result = rhs.index_of(kv.first);
             if (result == rhs.capacity_) return false;
             if (!(kv.second == rhs.values_[result].second)) return false;
         }

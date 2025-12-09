@@ -49,8 +49,8 @@ add_executable(s_flat_hash_map_basic
     s_flat_hash_map/tests/s_flat_hash_map_basic.cpp
 )
 
-add_executable(s_flat_hash_map_u32_basic
-    s_flat_hash_map/tests/s_flat_hash_map_u32_basic.cpp
+add_executable(test_fmu32
+    s_flat_hash_map/tests/test_fmu32.cpp
 )
 
 # =====================================================
