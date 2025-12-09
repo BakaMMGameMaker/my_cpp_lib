@@ -684,6 +684,29 @@ public:
         }
     }
 
+    // 覆盖已有值，若键不存在，dead loop
+    template <typename M>
+        requires(std::constructible_from<mapped_type, M>)
+    void overwrite(const key_type &key, M &&mapped) {
+#ifdef DEBUG
+        SizeT probe_len = 0;
+#endif
+        for (size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;;
+             index = (index + 1) & bucket_mask_) {
+#ifdef DEBUG
+            ++probe_len;
+#endif
+            key_type stored = slots_[index].key;
+            if (stored == key) {
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                values_[index].second = std::forward<M>(mapped);
+                return;
+            }
+        }
+    }
+
     template <std::input_iterator InputIt>
         requires std::convertible_to<std::iter_reference_t<InputIt>, value_type>
     void insert(InputIt first, InputIt last) {
@@ -771,11 +794,11 @@ private:
     // 当前这个版本，对于 find hit 最为友好，谨慎调整
     // 返回 capacity_ 代替 npos，减少外部分支
     size_type index_of(const key_type &key) const noexcept {
-        size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
-        for (;;) {
+        for (size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;;
+             index = (index + 1) & bucket_mask_) {
 #ifdef DEBUG
             ++probe_len;
 #endif
@@ -792,7 +815,6 @@ private:
 #endif
                 return capacity_; // 用 capacity_ 代替 npos，减少外部分支
             }
-            index = (index + 1) & bucket_mask_;
         }
     }
 

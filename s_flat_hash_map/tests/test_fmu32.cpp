@@ -184,7 +184,7 @@ static void test_basic_operations() {
         assert(m2.capacity() == 8);
     }
 
-    // emplace no return
+    // no return
     {
         map_t m3;
         m3.emplace<mcl::no_return>(1, 12);
@@ -213,7 +213,7 @@ static void test_basic_operations() {
         assert(m3.contains(5));
     }
 
-    // emplace no rehash
+    // no rehash
     {
         map_t m4;
         m4.reserve(64);
@@ -242,7 +242,7 @@ static void test_basic_operations() {
         assert(m4.contains(5));
     }
 
-    // emplace new
+    // no check dup
     {
         map_t m5;
         m5.reserve(64);
@@ -269,6 +269,18 @@ static void test_basic_operations() {
         assert(!m5.contains(3));
         assert(m5.contains(4));
         assert(m5.contains(5));
+    }
+
+    // overwrite
+    {
+        map_t m6;
+        auto it = m6.emplace<mcl::no_check_dup>(1, 12);
+        assert(m6.size() == 1);
+        assert(m6.contains(1));
+        assert(m6.find(1) != m6.end());
+        std::cout << "begin overwrite" << std::endl;
+        m6.overwrite(1, static_cast<UInt32>(23));
+        assert(it->second == static_cast<UInt32>(23));
     }
 }
 
