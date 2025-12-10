@@ -37,8 +37,8 @@ int main() {
 
 ## API 摘要
 - 构造/资源：默认、std::initializer_list、拷贝/移动、swap、get_allocator。
-- 容量：size/empty/capacity/growth_limit/load_factor/max_load_factor([f])，reserve(n)、rehash(n)、shrink_to_fit()。
-- 查找：find、contains、at、operator[]（需要 mapped_type 可默认构造）。
+- 容量：size/empty/capacity/growth_limit/load_factor/max_load_factor(lf)，reserve(n)、rehash(n)、shrink_to_fit()。
+- 查找：find、find exist、contains、at、operator[]（需要 mapped_type 可默认构造）。
 - 插入更新：insert、insert_or_assign、emplace、try_emplace、overwrite（假定键存在）、范围/初始化列表 insert。Policy 模板参数控制是否扩容/查重/返回值。
 - 删除：erase(key)、erase(iterator)；erase_exist 针对必然存在的键。
 - 迭代：begin/cbegin/end/cend，前向迭代器。

@@ -907,8 +907,7 @@ private:
                 // std::destroy_at(old_slots + index);
                 continue;
             }
-            size_type insert_index = find_insert_index_for_rehash(old_key);
-            // allocate storage 已经构造好了 slot 对象
+            size_type insert_index = rehash_index_of(old_key);
             slot_type &new_slot = slots_[insert_index];
             new_slot.key = old_key;
 
@@ -934,7 +933,7 @@ private:
     }
 
     // allocate storage 更新 bucket mask 后再调用
-    size_type find_insert_index_for_rehash(const key_type &key) {
+    size_type rehash_index_of(const key_type &key) {
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
