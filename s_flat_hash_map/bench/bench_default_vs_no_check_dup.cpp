@@ -185,7 +185,7 @@ static void BM_InsertKeys(benchmark::State &state, KeyDistribution dist, float m
 
 // ---------------- 注册：random 场景插入对比 ----------------
 
-using flat_map_u32 = mcl::flat_hash_map_u32<std::uint32_t>;
+using flat_map_u32 = mcl::flat_map_u32<std::uint32_t>;
 
 template <bool UseEmplaceNew, class Map, class Key> void register_int_family(const std::string &prefix) {
     constexpr KeyDistribution kDist = KeyDistribution::kRandom;

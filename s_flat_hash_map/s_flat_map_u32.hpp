@@ -2,6 +2,7 @@
 #include "s_alias.h"
 #include "s_detail.h"
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 #include <type_traits>
 
@@ -50,7 +51,7 @@ struct fast {
 
 template <typename MappedType, typename HasherType = detail::FastUInt32Hash,
           typename Alloc = std::allocator<std::pair<UInt32, MappedType>>> // TODO：Alloc 的默认参数可能需要更换
-class flat_hash_map_u32 {
+class flat_map_u32 {
 public:
     using key_type = UInt32;
     using mapped_type = MappedType;
@@ -63,10 +64,11 @@ public:
 
 private:
     struct Slot {
-        key_type key = k_unoccupied;
+        key_type key;
     };
 
     using slot_type = Slot;
+    static_assert(std::is_trivially_copyable_v<slot_type>, "slot_type must be trivially copyable"); // 防傻
     using slot_allocator_type = typename std::allocator_traits<allocator_type>::template rebind_alloc<slot_type>;
     using slot_alloc_traits = std::allocator_traits<slot_allocator_type>;
     using value_allocator_type = typename std::allocator_traits<allocator_type>::template rebind_alloc<value_type>;
@@ -86,16 +88,16 @@ private:
 public:
     class const_iterator;
     class iterator {
-        friend class flat_hash_map_u32;
+        friend class flat_map_u32;
         friend class const_iterator;
 
     public:
         using iterator_category = std::forward_iterator_tag;
-        using value_type = flat_hash_map_u32::value_type;
-        using difference_type = flat_hash_map_u32::difference_type;
+        using value_type = flat_map_u32::value_type;
+        using difference_type = flat_map_u32::difference_type;
 
     private:
-        using map_type = flat_hash_map_u32;
+        using map_type = flat_map_u32;
         using slot_type = map_type::slot_type;
 
         map_type *map_ = nullptr;
@@ -141,15 +143,15 @@ public:
     };
 
     class const_iterator {
-        friend class flat_hash_map_u32;
+        friend class flat_map_u32;
 
     public:
         using iterator_category = std::forward_iterator_tag;
-        using value_type = const flat_hash_map_u32::value_type;
-        using difference_type = flat_hash_map_u32::difference_type;
+        using value_type = const flat_map_u32::value_type;
+        using difference_type = flat_map_u32::difference_type;
 
     private:
-        using map_type = const flat_hash_map_u32;
+        using map_type = const flat_map_u32;
         using slot_type = const map_type::slot_type;
 
         const map_type *map_ = nullptr;
@@ -212,18 +214,18 @@ private:
                            std::conditional_t<Policy::check_dup, std::pair<size_type, bool>, size_type>, void>;
 
 public:
-    explicit flat_hash_map_u32(size_type init_size = 1, const Alloc &alloc = Alloc{})
+    explicit flat_map_u32(size_type init_size = 1, const Alloc &alloc = Alloc{})
         : hasher_(), alloc_(alloc), slot_alloc_(alloc_), value_alloc_(alloc_) {
         reserve(init_size);
     }
 
-    flat_hash_map_u32(std::initializer_list<value_type> init, const Alloc &alloc = Alloc{})
+    flat_map_u32(std::initializer_list<value_type> init, const Alloc &alloc = Alloc{})
         : hasher_(), alloc_(alloc), slot_alloc_(alloc_), value_alloc_(alloc_) {
         reserve(init.size());
         for (const auto &kv : init) { insert(kv); }
     }
 
-    flat_hash_map_u32(const flat_hash_map_u32 &other)
+    flat_map_u32(const flat_map_u32 &other)
         : hasher_(other.hasher_),
           alloc_(std::allocator_traits<Alloc>::select_on_container_copy_construction(other.alloc_)),
           slot_alloc_(alloc_), value_alloc_(alloc_) {
@@ -235,7 +237,7 @@ public:
         }
     }
 
-    flat_hash_map_u32 &operator=(const flat_hash_map_u32 &other) {
+    flat_map_u32 &operator=(const flat_map_u32 &other) {
         if (this == &other) return *this;
         clear();
         if constexpr (std::allocator_traits<Alloc>::propagate_on_container_copy_assignment::value) {
@@ -254,7 +256,7 @@ public:
     }
 
     // 照搬布局
-    flat_hash_map_u32(flat_hash_map_u32 &&other) noexcept
+    flat_map_u32(flat_map_u32 &&other) noexcept
         : hasher_(std::move(other.hasher_)), alloc_(std::move(other.alloc_)), slot_alloc_(std::move(other.slot_alloc_)),
           value_alloc_(std::move(other.value_alloc_)), slots_(other.slots_), values_(other.values_),
           capacity_(other.capacity_), bucket_mask_(other.bucket_mask_), size_(other.size_),
@@ -280,10 +282,10 @@ public:
 #endif
     }
 
-    flat_hash_map_u32 &operator=(flat_hash_map_u32 &&other) noexcept {
+    flat_map_u32 &operator=(flat_map_u32 &&other) noexcept {
         static_assert(slot_alloc_traits::is_always_equal::value ||
                           slot_alloc_traits::propagate_on_container_move_assignment::value,
-                      "flat_hash_map_u32 requires allocator that is always_equal or propagates on move assignment");
+                      "flat_map_u32 requires allocator that is always_equal or propagates on move assignment");
         if (this == &other) return *this;
         if (capacity_ > 0) {
             destroy_all();
@@ -326,7 +328,7 @@ public:
         return *this;
     }
 
-    ~flat_hash_map_u32() {
+    ~flat_map_u32() {
         if (capacity_ == 0) return;
         destroy_all();
         deallocate_storage();
@@ -354,7 +356,7 @@ public:
         for (size_type index = 0; index < capacity_; ++index) {
             if (slots_[index].key != k_unoccupied) {
                 slots_[index].key = k_unoccupied;
-                std::destroy_at(values_ + index);
+                if constexpr (!is_trivially_destructible_value) std::destroy_at(values_ + index);
             }
         }
         size_ = 0;
@@ -392,10 +394,10 @@ public:
         move_old_elements(old_slots, old_values, old_capacity);
     }
 
-    void swap(flat_hash_map_u32 &other) noexcept {
+    void swap(flat_map_u32 &other) noexcept {
         static_assert(std::allocator_traits<allocator_type>::propagate_on_container_swap::value ||
                           std::allocator_traits<allocator_type>::is_always_equal::value,
-                      "flat_hash_map_u32 requires allocator that is always_equal or propagates on swap");
+                      "flat_map_u32 requires allocator that is always_equal or propagates on swap");
         if (this == &other) return;
         using std::swap;
         if constexpr (std::allocator_traits<allocator_type>::propagate_on_container_swap::value) {
@@ -497,6 +499,11 @@ public:
     iterator find(const key_type &key) noexcept { return iterator(this, index_of(key)); }
 
     const_iterator find(const key_type &key) const noexcept { return const_iterator(this, index_of(key)); }
+
+    // key 不存在则 dead loop
+    iterator find_exist(const key_type &key) noexcept { return iterator(this, index_of_exist(key)); }
+
+    const_iterator find_exist(const key_type &key) const noexcept { return const_iterator(this, index_of_exist(key)); }
 
     bool contains(const key_type &key) const noexcept { return index_of(key) != capacity_; }
 
@@ -696,8 +703,7 @@ public:
 #ifdef DEBUG
             ++probe_len;
 #endif
-            key_type stored = slots_[index].key;
-            if (stored == key) {
+            if (slots_[index].key == key) {
 #ifdef DEBUG
                 record_probe(probe_len);
 #endif
@@ -722,9 +728,15 @@ public:
         return 1;
     }
 
+    void erase_exist(const key_type &key) { erase_at_index(index_of_exist(key)); }
+
     // 不检查 pos 是否指向合法槽位
     iterator erase(const_iterator pos) {
         if (pos == end()) return end();
+        return erase_exist(pos);
+    }
+
+    iterator erase_exist(const_iterator pos) {
         size_type index = pos.index_;
         erase_at_index(index);
         iterator it(this, index);
@@ -746,6 +758,7 @@ public:
 
 private:
     static constexpr key_type k_unoccupied = std::numeric_limits<UInt32>::max();
+    static constexpr bool is_trivially_destructible_value = std::is_trivially_destructible_v<value_type>;
 
     hasher_type hasher_{};
     allocator_type alloc_{};
@@ -780,9 +793,9 @@ private:
     template <InsertPolicy Policy> auto make_result(size_type index, bool inserted) -> insert_return_type<Policy> {
         if constexpr (Policy::return_value) {
             if constexpr (Policy::check_dup) {
-                return {iterator{this, index}, inserted};
+                return {iterator(this, index), inserted};
             } else {
-                return iterator{this, index};
+                return iterator(this, index);
             }
         } else {
             return;
@@ -818,16 +831,32 @@ private:
         }
     }
 
+    size_type index_of_exist(const key_type &key) const noexcept {
+#ifdef DEBUG
+        SizeT probe_len = 0;
+#endif
+        for (size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;;
+             index = (index + 1) & bucket_mask_) {
+#ifdef DEBUG
+            ++probe_len;
+#endif
+            key_type stored = slots_[index].key;
+            if (stored == key) {
+#ifdef DEBUG
+                record_probe(probe_len);
+#endif
+                return index;
+            }
+        }
+    }
+
     void allocate_storage(size_type capacity) {
         slots_ = slot_alloc_traits::allocate(slot_alloc_, capacity);
         values_ = value_alloc_traits::allocate(value_alloc_, capacity);
         capacity_ = capacity;
         bucket_mask_ = capacity_ - 1;
         growth_limit_ = static_cast<size_type>(max_load_factor_ * static_cast<float>(capacity_));
-
-        for (size_type index = 0; index < capacity_; ++index) {
-            std::construct_at(slots_ + index); // 默认 key = k empty key
-        }
+        std::memset(static_cast<void *>(slots_), static_cast<int>(k_unoccupied), capacity_ * sizeof(slot_type));
     }
 
     void deallocate_storage() noexcept {
@@ -835,12 +864,11 @@ private:
         value_alloc_traits::deallocate(value_alloc_, values_, capacity_);
     }
 
-    // 注意这里 destroy all 和泛型版本不一样，每个槽位都有构造过的 Slot 对象
-    // TODO：在 valuetype 也是 pod 类型的情况下，可以直接省去 destroy 的步骤
     void destroy_all() noexcept {
+        if constexpr (is_trivially_destructible_value) return;
         for (size_type index = 0; index < capacity_; ++index) {
             if (slots_[index].key != k_unoccupied) std::destroy_at(values_ + index);
-            std::destroy_at(slots_ + index);
+            // std::destroy_at(slots_ + index);
         }
     }
 
@@ -849,7 +877,7 @@ private:
             slot_type &old_slot = old_slots[index];
             key_type old_key = old_slot.key;
             if (old_slot.key == k_unoccupied) {
-                std::destroy_at(old_slots + index); // 析构 Slot
+                // std::destroy_at(old_slots + index);
                 continue;
             }
             size_type insert_index = find_insert_index_for_rehash(old_key);
@@ -858,8 +886,8 @@ private:
             new_slot.key = old_key;
 
             std::construct_at(values_ + insert_index, std::move(old_values[index]));
-            std::destroy_at(old_slots + index);
-            std::destroy_at(old_values + index);
+            // std::destroy_at(old_slots + index);
+            if (!is_trivially_destructible_value) std::destroy_at(old_values + index);
         }
         slot_alloc_traits::deallocate(slot_alloc_, old_slots, old_capacity);
         value_alloc_traits::deallocate(value_alloc_, old_values, old_capacity);
@@ -877,6 +905,7 @@ private:
         move_old_elements(old_slots, old_values, old_capacity);
     }
 
+    // allocate storage 更新 bucket mask 后再调用
     size_type find_insert_index_for_rehash(const key_type &key) {
         size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;
 #ifdef DEBUG
@@ -914,11 +943,11 @@ private:
             cur = next;
         }
         slots_[cur].key = k_unoccupied;
-        std::destroy_at(values_ + cur);
+        if (!is_trivially_destructible_value) std::destroy_at(values_ + cur);
         --size_;
     }
 
-    friend bool operator==(const flat_hash_map_u32 &lhs, const flat_hash_map_u32 &rhs) {
+    friend bool operator==(const flat_map_u32 &lhs, const flat_map_u32 &rhs) {
         if (&lhs == &rhs) return true;
         if (lhs.size_ != rhs.size_) return false;
         if (lhs.size_ == 0) return true;
@@ -935,8 +964,6 @@ private:
         return true;
     }
 
-    friend void swap(flat_hash_map_u32 &lhs, flat_hash_map_u32 &rhs) noexcept(noexcept(lhs.swap(rhs))) {
-        lhs.swap(rhs);
-    }
+    friend void swap(flat_map_u32 &lhs, flat_map_u32 &rhs) noexcept(noexcept(lhs.swap(rhs))) { lhs.swap(rhs); }
 }; // flat hash map uint32
 } // namespace mcl

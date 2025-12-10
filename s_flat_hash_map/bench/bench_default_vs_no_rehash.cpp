@@ -195,7 +195,7 @@ static void BM_InsertDuplicateKeys(benchmark::State &state, KeyDistribution dist
 
 // ---------------- 注册：只测 random insert & insert_dup ----------------
 
-using flat_map_u32 = mcl::flat_hash_map_u32<std::uint32_t>;
+using flat_map_u32 = mcl::flat_map_u32<std::uint32_t>;
 
 template <bool UseNoRehash, class Map, class Key> void register_int_family(const std::string &prefix) {
     // 只测随机分布，最能体现实际表现

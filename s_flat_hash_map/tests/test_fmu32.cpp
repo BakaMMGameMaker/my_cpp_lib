@@ -52,7 +52,7 @@ template <typename T> struct CountingAllocator {
 };
 
 static void test_basic_operations() {
-    using map_t = mcl::flat_hash_map_u32<UInt32>;
+    using map_t = mcl::flat_map_u32<UInt32>;
 
     {
         map_t m;
@@ -158,7 +158,7 @@ static void test_basic_operations() {
 
     // move 行为
     {
-        using move_map_t = mcl::flat_hash_map_u32<std::unique_ptr<UInt32>>;
+        using move_map_t = mcl::flat_map_u32<std::unique_ptr<UInt32>>;
         move_map_t mm;
         auto up = std::make_unique<UInt32>(99);
         auto [mit, minserted] = mm.try_emplace(1u, std::move(up));
@@ -278,14 +278,31 @@ static void test_basic_operations() {
         assert(m6.size() == 1);
         assert(m6.contains(1));
         assert(m6.find(1) != m6.end());
-        std::cout << "begin overwrite" << std::endl;
         m6.overwrite(1, static_cast<UInt32>(23));
         assert(it->second == static_cast<UInt32>(23));
+    }
+
+    // find & erase exist
+    {
+        map_t m7;
+        m7.emplace<mcl::fast>(1, 12);
+        assert(m7.size() == 1);
+        assert(m7.contains(1));
+        auto it = m7.find_exist(1);
+        it->second = 23;
+        assert(m7.find(1) != m7.end());
+        auto it2 = m7.find(1);
+        assert(it2->second == 23);
+        it2->second = 34;
+        assert(it->second == 34);
+        m7.erase_exist(1);
+        assert(!m7.contains(1));
+        assert(m7.erase(1) == 0);
     }
 }
 
 static void test_insert_range_and_init_list() {
-    using map_t = mcl::flat_hash_map_u32<UInt32>;
+    using map_t = mcl::flat_map_u32<UInt32>;
     map_t m;
 
     std::vector<map_t::value_type> src = {{1u, 10u}, {2u, 20u}, {2u, 200u}};
@@ -301,7 +318,7 @@ static void test_insert_range_and_init_list() {
 }
 
 static void test_shrink_to_fit() {
-    using map_t = mcl::flat_hash_map_u32<UInt32>;
+    using map_t = mcl::flat_map_u32<UInt32>;
 
     map_t m;
     m.emplace(1u, 1u);
@@ -340,7 +357,7 @@ static void test_shrink_to_fit() {
 }
 
 static void test_high_collision() {
-    using map_t = mcl::flat_hash_map_u32<UInt32, bad_hash_u32>;
+    using map_t = mcl::flat_map_u32<UInt32, bad_hash_u32>;
     map_t m;
     constexpr SizeT N = 128;
     for (UInt32 i = 0; i < N; ++i) {
@@ -373,7 +390,7 @@ static void test_high_collision() {
 }
 
 static void test_load_factor_and_rehash() {
-    using map_t = mcl::flat_hash_map_u32<UInt32>;
+    using map_t = mcl::flat_map_u32<UInt32>;
     map_t m;
     m.max_load_factor(0.5f);
     m.reserve(8);
@@ -397,7 +414,7 @@ static void test_load_factor_and_rehash() {
 }
 
 static void test_insert_erase_insert_cycle() {
-    using map_t = mcl::flat_hash_map_u32<UInt32>;
+    using map_t = mcl::flat_map_u32<UInt32>;
 
     map_t m;
     m.max_load_factor(0.75f);
@@ -427,7 +444,7 @@ static void test_insert_erase_insert_cycle() {
 }
 
 static void test_iterators() {
-    using map_t = mcl::flat_hash_map_u32<UInt32>;
+    using map_t = mcl::flat_map_u32<UInt32>;
 
     map_t m;
 
@@ -450,7 +467,7 @@ static void test_iterators() {
 
 static void test_allocator_behavior() {
     using value_type = std::pair<UInt32, UInt32>;
-    using map_t = mcl::flat_hash_map_u32<UInt32, mcl::detail::FastUInt32Hash, CountingAllocator<value_type>>;
+    using map_t = mcl::flat_map_u32<UInt32, mcl::detail::FastUInt32Hash, CountingAllocator<value_type>>;
 
     AllocStats::reset();
     {
@@ -475,7 +492,7 @@ static void test_allocator_behavior() {
 }
 
 int main() {
-    std::cout << "[flat_hash_map_u32] basic tests running...\n";
+    std::cout << "[flat_map_u32] basic tests running...\n";
 
     test_basic_operations();
     std::cout << "  basic_operations OK\n";
