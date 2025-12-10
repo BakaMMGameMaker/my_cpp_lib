@@ -55,7 +55,7 @@ class flat_map_u32 {
 public:
     using key_type = UInt32;
     using mapped_type = MappedType;
-    using value_type = std::pair<key_type, mapped_type>;
+    using value_type = std::pair<const key_type, mapped_type>;
     using size_type = SizeT;
     using difference_type = std::ptrdiff_t;
     using hasher_type = HasherType;
@@ -71,8 +71,8 @@ private:
     static_assert(std::is_trivially_copyable_v<slot_type>, "slot_type must be trivially copyable"); // 防傻
     using slot_allocator_type = typename std::allocator_traits<allocator_type>::template rebind_alloc<slot_type>;
     using slot_alloc_traits = std::allocator_traits<slot_allocator_type>;
-    using value_allocator_type = typename std::allocator_traits<allocator_type>::template rebind_alloc<value_type>;
-    using value_alloc_traits = std::allocator_traits<value_allocator_type>;
+    using mapped_allocator_type = typename std::allocator_traits<allocator_type>::template rebind_alloc<mapped_type>;
+    using mapped_alloc_traits = std::allocator_traits<mapped_allocator_type>;
 
 #ifdef DEBUG
     struct debug_stats {
@@ -85,6 +85,31 @@ private:
     };
 #endif
 
+    struct value_reference {
+        key_type &first;
+        mapped_type &second;
+        operator value_type() const noexcept { return value_type{first, second}; }
+    };
+
+    struct const_value_reference {
+        const key_type &first;
+        const mapped_type &second;
+        operator value_type() const noexcept { return value_type(first, second); }
+    };
+
+    struct value_pointer {
+        key_type &first;
+        mapped_type &second;
+        value_pointer *operator->() noexcept { return this; }
+        const value_pointer *operator->() const noexcept { return this; }
+    };
+
+    struct const_value_pointer {
+        const key_type &first;
+        const mapped_type &second;
+        const const_value_pointer *operator->() const noexcept { return this; }
+    };
+
 public:
     class const_iterator;
     class iterator {
@@ -93,8 +118,9 @@ public:
 
     public:
         using iterator_category = std::forward_iterator_tag;
-        using value_type = flat_map_u32::value_type;
         using difference_type = flat_map_u32::difference_type;
+        using reference = flat_map_u32::value_reference;
+        using pointer = flat_map_u32::value_pointer;
 
     private:
         using map_type = flat_map_u32;
@@ -104,10 +130,11 @@ public:
         size_type index_ = 0;
         size_type capacity_ = 0;
         slot_type *slots_ = nullptr;
-        value_type *values_ = nullptr;
+        mapped_type *mapped_values_ = nullptr;
 
         iterator(map_type *map, size_type index) noexcept
-            : map_(map), index_(index), capacity_(map->capacity_), slots_(map->slots_), values_(map->values_) {}
+            : map_(map), index_(index), capacity_(map->capacity_), slots_(map->slots_),
+              mapped_values_(map->mapped_values_) {}
 
         void skip_to_next_occupied() noexcept {
             while (index_ < capacity_) {
@@ -119,9 +146,9 @@ public:
     public:
         iterator() noexcept = default;
 
-        value_type &operator*() const noexcept { return values_[index_]; }
+        reference operator*() const noexcept { return reference{slots_[index_].key, mapped_values_[index_]}; }
 
-        value_type *operator->() const noexcept { return std::addressof(values_[index_]); }
+        pointer operator->() const noexcept { return pointer{slots_[index_].key, mapped_values_[index_]}; }
 
         iterator &operator++() noexcept {
             ++index_;
@@ -149,6 +176,8 @@ public:
         using iterator_category = std::forward_iterator_tag;
         using value_type = const flat_map_u32::value_type;
         using difference_type = flat_map_u32::difference_type;
+        using reference = flat_map_u32::const_value_reference;
+        using pointer = flat_map_u32::const_value_pointer;
 
     private:
         using map_type = const flat_map_u32;
@@ -158,10 +187,10 @@ public:
         size_type index_ = 0;
         size_type capacity_ = 0;
         const slot_type *slots_ = nullptr;
-        const value_type *values_ = nullptr;
+        const mapped_type *values_ = nullptr;
 
         const_iterator(const map_type *map, size_type index) noexcept
-            : map_(map), index_(index), capacity_(map->capacity_), slots_(map->slots_), values_(map->values_) {}
+            : map_(map), index_(index), capacity_(map->capacity_), slots_(map->slots_), values_(map->mapped_values_) {}
 
         void skip_to_next_occupied() noexcept {
             while (index_ < capacity_) {
@@ -174,11 +203,12 @@ public:
         const_iterator() noexcept = default;
 
         const_iterator(const iterator &it) noexcept
-            : map_(it.map_), index_(it.index_), capacity_(it.capacity_), slots_(it.slots_), values_(it.values_) {}
+            : map_(it.map_), index_(it.index_), capacity_(it.capacity_), slots_(it.slots_), values_(it.mapped_values_) {
+        }
 
-        const value_type &operator*() const noexcept { return values_[index_]; }
+        reference operator*() const noexcept { return reference{slots_[index_].key, values_[index_]}; }
 
-        const value_type *operator->() const noexcept { return std::addressof(values_[index_]); }
+        pointer operator->() const noexcept { return pointer{slots_[index_].key, values_[index_]}; }
 
         const_iterator &operator++() noexcept {
             ++index_;
@@ -215,12 +245,12 @@ private:
 
 public:
     explicit flat_map_u32(size_type init_size = 1, const Alloc &alloc = Alloc{})
-        : hasher_(), alloc_(alloc), slot_alloc_(alloc_), value_alloc_(alloc_) {
+        : hasher_(), alloc_(alloc), slot_alloc_(alloc_), mapped_alloc_(alloc_) {
         reserve(init_size);
     }
 
     flat_map_u32(std::initializer_list<value_type> init, const Alloc &alloc = Alloc{})
-        : hasher_(), alloc_(alloc), slot_alloc_(alloc_), value_alloc_(alloc_) {
+        : hasher_(), alloc_(alloc), slot_alloc_(alloc_), mapped_alloc_(alloc_) {
         reserve(init.size());
         for (const auto &kv : init) { insert(kv); }
     }
@@ -228,12 +258,13 @@ public:
     flat_map_u32(const flat_map_u32 &other)
         : hasher_(other.hasher_),
           alloc_(std::allocator_traits<Alloc>::select_on_container_copy_construction(other.alloc_)),
-          slot_alloc_(alloc_), value_alloc_(alloc_) {
+          slot_alloc_(alloc_), mapped_alloc_(alloc_) {
         if (other.size_ == 0) return;
         rehash(other.capacity_);
         for (size_type index = 0; index < other.capacity_; ++index) {
-            if (other.slots_[index].key == k_unoccupied) continue;
-            insert(other.values_[index]);
+            key_type key = other.slots_[index].key;
+            if (key == k_unoccupied) continue;
+            emplace<mcl::fast>(key, other.mapped_values_[index]); // 此时不可能重复，不可能扩容，无需返回值
         }
     }
 
@@ -243,14 +274,15 @@ public:
         if constexpr (std::allocator_traits<Alloc>::propagate_on_container_copy_assignment::value) {
             alloc_ = other.alloc_;
             slot_alloc_ = other.slot_alloc_;
-            value_alloc_ = other.value_alloc_;
+            mapped_alloc_ = other.mapped_alloc_;
         }
         hasher_ = other.hasher_;
         if (other.size_ == 0) return *this;
         rehash(other.capacity_);
         for (size_type index = 0; index < other.capacity_; ++index) {
+            key_type key = other.slots_[index].key;
             if (other.slots_[index].key == k_unoccupied) continue;
-            insert(other.values_[index]);
+            emplace<mcl::fast>(key, other.mapped_values_[index]);
         }
         return *this;
     }
@@ -258,7 +290,7 @@ public:
     // 照搬布局
     flat_map_u32(flat_map_u32 &&other) noexcept
         : hasher_(std::move(other.hasher_)), alloc_(std::move(other.alloc_)), slot_alloc_(std::move(other.slot_alloc_)),
-          value_alloc_(std::move(other.value_alloc_)), slots_(other.slots_), values_(other.values_),
+          mapped_alloc_(std::move(other.mapped_alloc_)), slots_(other.slots_), mapped_values_(other.mapped_values_),
           capacity_(other.capacity_), bucket_mask_(other.bucket_mask_), size_(other.size_),
           growth_limit_(other.growth_limit_), max_load_factor_(other.max_load_factor_)
 #ifdef DEBUG
@@ -268,7 +300,7 @@ public:
 #endif
     {
         other.slots_ = nullptr;
-        other.values_ = nullptr;
+        other.mapped_values_ = nullptr;
         other.capacity_ = 0;
         other.bucket_mask_ = 0;
         other.size_ = 0;
@@ -294,11 +326,11 @@ public:
         if constexpr (slot_alloc_traits::propagate_on_container_move_assignment::value) {
             alloc_ = std::move(other.alloc_);
             slot_alloc_ = std::move(other.slot_alloc_);
-            value_alloc_ = std::move(other.value_alloc_);
+            mapped_alloc_ = std::move(other.mapped_alloc_);
         }
         hasher_ = std::move(other.hasher_);
         slots_ = other.slots_;
-        values_ = other.values_;
+        mapped_values_ = other.mapped_values_;
         capacity_ = other.capacity_;
         bucket_mask_ = other.bucket_mask_;
         size_ = other.size_;
@@ -313,7 +345,7 @@ public:
 #endif
 
         other.slots_ = nullptr;
-        other.values_ = nullptr;
+        other.mapped_values_ = nullptr;
         other.capacity_ = 0;
         other.bucket_mask_ = 0;
         other.size_ = 0;
@@ -356,7 +388,7 @@ public:
         for (size_type index = 0; index < capacity_; ++index) {
             if (slots_[index].key != k_unoccupied) {
                 slots_[index].key = k_unoccupied;
-                if constexpr (!is_trivially_destructible_value) std::destroy_at(values_ + index);
+                if constexpr (!is_trivially_destructible_mapped) std::destroy_at(mapped_values_ + index);
             }
         }
         size_ = 0;
@@ -375,7 +407,7 @@ public:
             if (capacity_ == 0) return;
             deallocate_storage();
             slots_ = nullptr;
-            values_ = nullptr;
+            mapped_values_ = nullptr;
             capacity_ = 0;
             bucket_mask_ = 0;
             growth_limit_ = 0;
@@ -388,10 +420,10 @@ public:
         if (new_capacity == capacity_) return;
 
         slot_type *old_slots = slots_;
-        value_type *old_values = values_;
+        mapped_type *old_mapped_values = mapped_values_;
         size_type old_capacity = capacity_;
         allocate_storage(new_capacity);
-        move_old_elements(old_slots, old_values, old_capacity);
+        move_old_elements(old_slots, old_mapped_values, old_capacity);
     }
 
     void swap(flat_map_u32 &other) noexcept {
@@ -403,11 +435,11 @@ public:
         if constexpr (std::allocator_traits<allocator_type>::propagate_on_container_swap::value) {
             swap(alloc_, other.alloc_);
             swap(slot_alloc_, other.slot_alloc_);
-            swap(value_alloc_, other.value_alloc_);
+            swap(mapped_alloc_, other.mapped_alloc_);
         }
         swap(hasher_, other.hasher_);
         swap(slots_, other.slots_);
-        swap(values_, other.values_);
+        swap(mapped_values_, other.mapped_values_);
         swap(capacity_, other.capacity_);
         swap(bucket_mask_, other.bucket_mask_);
         swap(size_, other.size_);
@@ -439,7 +471,7 @@ public:
             deallocate_storage();
             if (new_capacity == 0) {
                 slots_ = nullptr;
-                values_ = nullptr;
+                mapped_values_ = nullptr;
                 capacity_ = 0;
                 bucket_mask_ = 0;
                 growth_limit_ = 0;
@@ -467,13 +499,13 @@ public:
         if (new_capacity == capacity_) return;
 
         slot_type *old_slots = slots_;
-        value_type *old_values = values_;
+        mapped_type *old_mapped_values = mapped_values_;
         size_type old_capacity = capacity_;
         allocate_storage(new_capacity);
 #ifdef DEBUG
         ++rehash_count_;
 #endif
-        move_old_elements(old_slots, old_values, old_capacity);
+        move_old_elements(old_slots, old_mapped_values, old_capacity);
     }
 
     iterator begin() noexcept {
@@ -520,10 +552,9 @@ public:
     }
 
     mapped_type &operator[](const key_type &key) {
-        // 不检查是否插入哨兵值
         if (size_ >= growth_limit_) { // 临界元素
             size_type existing = index_of(key);
-            if (existing != capacity_) return values_[existing].second;
+            if (existing != capacity_) return mapped_values_[existing];
             double_storage();
         }
 #ifdef DEBUG
@@ -538,19 +569,18 @@ public:
             key_type stored_key = slot.key;
             if (stored_key == k_unoccupied) {
                 slot.key = key;
-                std::construct_at(values_ + index, std::piecewise_construct, std::forward_as_tuple(key),
-                                  std::forward_as_tuple());
+                std::construct_at(mapped_values_ + index);
                 ++size_;
 #ifdef DEBUG
                 record_probe(probe_len);
 #endif
-                return values_[index].second;
+                return mapped_values_[index];
             }
             if (stored_key == key) {
 #ifdef DEBUG
                 record_probe(probe_len);
 #endif
-                return values_[index].second;
+                return mapped_values_[index];
             }
         }
     }
@@ -570,7 +600,7 @@ public:
             if (size_ >= growth_limit_) {
                 size_type existing = index_of(key);
                 if (existing != capacity_) {
-                    values_[existing].second = std::forward<M>(mapped);
+                    mapped_values_[existing] = std::forward<M>(mapped);
                     return make_result<Policy>(existing, false);
                 }
                 double_storage();
@@ -588,8 +618,7 @@ public:
             key_type stored_key = slot.key;
             if (stored_key == k_unoccupied) {
                 slot.key = key;
-                std::construct_at(values_ + index, std::piecewise_construct, std::forward_as_tuple(key),
-                                  std::forward_as_tuple(std::forward<M>(mapped)));
+                std::construct_at(mapped_values_ + index, std::forward<M>(mapped));
                 ++size_;
 #ifdef DEBUG
                 record_probe(probe_len);
@@ -599,7 +628,7 @@ public:
             // 虽然调用 insert or assign 的不至于关掉 check dup，但这里保持一致性，反正也没坏处
             if constexpr (Policy::check_dup) {
                 if (stored_key == key) {
-                    values_[index].second = std::forward<M>(mapped);
+                    mapped_values_[index] = std::forward<M>(mapped);
 #ifdef DEBUG
                     record_probe(probe_len);
 #endif
@@ -631,8 +660,7 @@ public:
             key_type stored_key = slot.key;
             if (stored_key == k_unoccupied) {
                 slot.key = key;
-                std::construct_at(values_ + index, std::piecewise_construct, std::forward_as_tuple(key),
-                                  std::forward_as_tuple(std::forward<M>(mapped)));
+                std::construct_at(mapped_values_ + index, std::forward<M>(mapped));
                 ++size_;
 #ifdef DEBUG
                 record_probe(probe_len);
@@ -672,8 +700,7 @@ public:
             key_type stored_key = slot.key;
             if (stored_key == k_unoccupied) {
                 slot.key = key;
-                std::construct_at(values_ + index, std::piecewise_construct, std::forward_as_tuple(key),
-                                  std::forward_as_tuple(std::forward<Args>(args)...));
+                std::construct_at(mapped_values_ + index, std::forward<Args>(args)...);
                 ++size_;
 #ifdef DEBUG
                 record_probe(probe_len);
@@ -707,7 +734,7 @@ public:
 #ifdef DEBUG
                 record_probe(probe_len);
 #endif
-                values_[index].second = std::forward<M>(mapped);
+                mapped_values_[index] = std::forward<M>(mapped);
                 return;
             }
         }
@@ -758,15 +785,15 @@ public:
 
 private:
     static constexpr key_type k_unoccupied = std::numeric_limits<UInt32>::max();
-    static constexpr bool is_trivially_destructible_value = std::is_trivially_destructible_v<value_type>;
+    static constexpr bool is_trivially_destructible_mapped = std::is_trivially_destructible_v<mapped_type>;
 
     hasher_type hasher_{};
     allocator_type alloc_{};
     slot_allocator_type slot_alloc_{};
-    value_allocator_type value_alloc_{};
+    mapped_allocator_type mapped_alloc_{};
 
     slot_type *slots_ = nullptr; // 只包含 key
-    value_type *values_ = nullptr;
+    mapped_type *mapped_values_ = nullptr;
 
     size_type capacity_ = 0;
     size_type bucket_mask_ = 0;
@@ -852,7 +879,7 @@ private:
 
     void allocate_storage(size_type capacity) {
         slots_ = slot_alloc_traits::allocate(slot_alloc_, capacity);
-        values_ = value_alloc_traits::allocate(value_alloc_, capacity);
+        mapped_values_ = mapped_alloc_traits::allocate(mapped_alloc_, capacity);
         capacity_ = capacity;
         bucket_mask_ = capacity_ - 1;
         growth_limit_ = static_cast<size_type>(max_load_factor_ * static_cast<float>(capacity_));
@@ -861,18 +888,18 @@ private:
 
     void deallocate_storage() noexcept {
         slot_alloc_traits::deallocate(slot_alloc_, slots_, capacity_);
-        value_alloc_traits::deallocate(value_alloc_, values_, capacity_);
+        mapped_alloc_traits::deallocate(mapped_alloc_, mapped_values_, capacity_);
     }
 
     void destroy_all() noexcept {
-        if constexpr (is_trivially_destructible_value) return;
+        if constexpr (is_trivially_destructible_mapped) return;
         for (size_type index = 0; index < capacity_; ++index) {
-            if (slots_[index].key != k_unoccupied) std::destroy_at(values_ + index);
+            if (slots_[index].key != k_unoccupied) std::destroy_at(mapped_values_ + index);
             // std::destroy_at(slots_ + index);
         }
     }
 
-    void move_old_elements(slot_type *old_slots, value_type *old_values, size_type old_capacity) {
+    void move_old_elements(slot_type *old_slots, mapped_type *old_values, size_type old_capacity) {
         for (size_type index = 0; index < old_capacity; ++index) {
             slot_type &old_slot = old_slots[index];
             key_type old_key = old_slot.key;
@@ -885,17 +912,18 @@ private:
             slot_type &new_slot = slots_[insert_index];
             new_slot.key = old_key;
 
-            std::construct_at(values_ + insert_index, std::move(old_values[index]));
+            // TODO: trivially 优化
+            std::construct_at(mapped_values_ + insert_index, std::move(old_values[index]));
             // std::destroy_at(old_slots + index);
-            if (!is_trivially_destructible_value) std::destroy_at(old_values + index);
+            if (!is_trivially_destructible_mapped) std::destroy_at(old_values + index);
         }
         slot_alloc_traits::deallocate(slot_alloc_, old_slots, old_capacity);
-        value_alloc_traits::deallocate(value_alloc_, old_values, old_capacity);
+        mapped_alloc_traits::deallocate(mapped_alloc_, old_values, old_capacity);
     }
 
     void double_storage() {
         slot_type *old_slots = slots_;
-        value_type *old_values = values_;
+        mapped_type *old_values = mapped_values_;
         size_type old_capacity = capacity_;
         allocate_storage(capacity_ * 2);
 #ifdef DEBUG
@@ -907,11 +935,11 @@ private:
 
     // allocate storage 更新 bucket mask 后再调用
     size_type find_insert_index_for_rehash(const key_type &key) {
-        size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
-        for (;;) {
+        for (size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;;
+             index = (index + 1) & bucket_mask_) {
 #ifdef DEBUG
             ++probe_len;
 #endif
@@ -921,29 +949,28 @@ private:
 #endif
                 return index;
             }
-            index = (index + 1) & bucket_mask_;
         }
     }
 
     void erase_at_index(size_type index) noexcept {
         // 左移 cluster
-        size_type cur = index;
+        size_type cur_index = index;
         for (;;) {
-            size_type next = (cur + 1) & bucket_mask_;
-            slot_type &next_slot = slots_[next];
+            size_type next_index = (cur_index + 1) & bucket_mask_;
+            slot_type &next_slot = slots_[next_index];
             key_type next_key = next_slot.key;
             if (next_key == k_unoccupied) break; // 遇到 EMPTY
 
             SizeT next_hash = hash_of(next_key);
             size_type home = static_cast<size_type>(next_hash) & bucket_mask_;
-            if (home == next) break; // 下一个元素在自己家上，不要左移
+            if (home == next_index) break; // 下一个元素在自己家上，不要左移
 
-            slots_[cur].key = next_key;
-            values_[cur] = std::move(values_[next]);
-            cur = next;
+            slots_[cur_index].key = next_key;
+            mapped_values_[cur_index] = std::move(mapped_values_[next_index]);
+            cur_index = next_index;
         }
-        slots_[cur].key = k_unoccupied;
-        if (!is_trivially_destructible_value) std::destroy_at(values_ + cur);
+        slots_[cur_index].key = k_unoccupied;
+        if (!is_trivially_destructible_mapped) std::destroy_at(mapped_values_ + cur_index);
         --size_;
     }
 
@@ -951,15 +978,15 @@ private:
         if (&lhs == &rhs) return true;
         if (lhs.size_ != rhs.size_) return false;
         if (lhs.size_ == 0) return true;
+
         for (size_type index = 0; index < lhs.capacity_; ++index) {
-            const slot_type &slot = lhs.slots_[index];
-            key_type stored_key = slot.key;
+            key_type stored_key = lhs.slots_[index].key;
             if (stored_key == k_unoccupied) continue;
 
-            const value_type &kv = lhs.values_[index];
-            size_type result = rhs.index_of(kv.first);
-            if (result == rhs.capacity_) return false;
-            if (!(kv.second == rhs.values_[result].second)) return false;
+            const mapped_type &lhs_mapped = lhs.mapped_values_[index];
+            size_type rhs_index = rhs.index_of(stored_key);
+            if (rhs_index == rhs.capacity_) return false;
+            if (!(lhs_mapped == rhs.mapped_values_[rhs_index])) return false;
         }
         return true;
     }
