@@ -32,7 +32,7 @@ add_compile_options(
 # =====================================================
 include_directories(
     ${CMAKE_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/s_flat_hash_map
+    ${CMAKE_SOURCE_DIR}/s_hash_map
     ${CMAKE_SOURCE_DIR}/s_trie
 )
 
@@ -51,11 +51,11 @@ link_directories(
 #                     Target 1: Tests
 # =====================================================
 add_executable(s_flat_hash_map_basic
-    s_flat_hash_map/tests/s_flat_hash_map_basic.cpp
+    s_hash_map/tests/s_flat_hash_map_basic.cpp
 )
 
 add_executable(test_fmu32
-    s_flat_hash_map/tests/test_fmu32.cpp
+    s_hash_map/tests/test_fmu32.cpp
 )
 
 # =====================================================
@@ -100,7 +100,7 @@ set(BENCH_COMMON_LIBS
 # =====================================================
 foreach(tgt IN LISTS BENCH_TARGETS)
     add_executable(${tgt}
-        s_flat_hash_map/bench/${tgt}.cpp
+        s_hash_map/bench/${tgt}.cpp
     )
 
     target_compile_definitions(${tgt} PRIVATE ${BENCH_COMMON_DEFS})

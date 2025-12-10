@@ -1,53 +1,13 @@
 #pragma once
 #include "s_alias.h"
 #include "s_detail.h"
+#include "s_hash_map_policy.hpp"
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
 #include <type_traits>
 
 namespace mcl {
-
-template <typename P>
-concept InsertPolicy = requires {
-    { P::return_value } -> std::convertible_to<bool>; // 是否返回值
-    { P::rehash } -> std::convertible_to<bool>;       // 是否触发扩容
-    { P::check_dup } -> std::convertible_to<bool>;    // 是否检查重复键
-};
-
-struct default_policy {
-    static constexpr bool return_value = true;
-    static constexpr bool rehash = true;
-    static constexpr bool check_dup = true;
-};
-
-// 不返回值
-struct no_return {
-    static constexpr bool return_value = false;
-    static constexpr bool rehash = true;
-    static constexpr bool check_dup = true;
-};
-
-// 不扩容
-struct no_rehash {
-    static constexpr bool return_value = true;
-    static constexpr bool rehash = false;
-    static constexpr bool check_dup = true;
-};
-
-// 不查重
-struct no_check_dup {
-    static constexpr bool return_value = true;
-    static constexpr bool rehash = true;
-    static constexpr bool check_dup = false;
-};
-
-// 仅插入元素
-struct fast {
-    static constexpr bool return_value = false;
-    static constexpr bool rehash = false;
-    static constexpr bool check_dup = false;
-};
 
 template <typename MappedType, typename HasherType = detail::FastUInt32Hash,
           typename Alloc = std::allocator<std::pair<UInt32, MappedType>>> // TODO：Alloc 的默认参数可能需要更换
@@ -63,6 +23,10 @@ public:
     using allocator_type = Alloc;
 
 private:
+    static constexpr key_type k_unoccupied = std::numeric_limits<UInt32>::max();
+    static constexpr size_type k_min_capacity = 8;
+    static constexpr bool is_trivially_destructible_mapped = std::is_trivially_destructible_v<mapped_type>;
+
     struct Slot {
         key_type key;
     };
@@ -389,9 +353,10 @@ public:
     }
 
     void reserve(size_type new_size) {
+        if (new_size <= size_) return;
         float need = static_cast<float>(new_size) / max_load_factor_;
         size_type min_capacity = static_cast<size_type>(std::ceil(need));
-        if (min_capacity < detail::k_min_capacity) min_capacity = detail::k_min_capacity;
+        if (min_capacity < k_min_capacity) min_capacity = k_min_capacity;
         if (min_capacity <= capacity_) return;
         rehash(min_capacity);
     }
@@ -408,7 +373,7 @@ public:
             return;
         }
         size_type new_capacity = static_cast<size_type>(std::ceil(static_cast<float>(size_) / max_load_factor_));
-        if (new_capacity <= detail::k_min_capacity) new_capacity = detail::k_min_capacity;
+        if (new_capacity <= k_min_capacity) new_capacity = k_min_capacity;
         else new_capacity = detail::next_power_of_two(new_capacity);
 
         if (new_capacity == capacity_) return;
@@ -451,7 +416,7 @@ public:
     void rehash(size_type new_capacity) {
         if (capacity_ == 0) {
             if (new_capacity == 0) return;
-            if (new_capacity <= detail::k_min_capacity) new_capacity = detail::k_min_capacity;
+            if (new_capacity <= k_min_capacity) new_capacity = k_min_capacity;
             else new_capacity = detail::next_power_of_two(new_capacity);
             allocate_storage(new_capacity);
 #ifdef DEBUG
@@ -461,7 +426,6 @@ public:
         }
 
         if (size_ == 0) {
-            destroy_all();
             deallocate_storage();
             if (new_capacity == 0) {
                 slots_ = nullptr;
@@ -474,7 +438,7 @@ public:
 #endif
                 return;
             }
-            if (new_capacity <= detail::k_min_capacity) new_capacity = detail::k_min_capacity;
+            if (new_capacity <= k_min_capacity) new_capacity = k_min_capacity;
             else new_capacity = detail::next_power_of_two(new_capacity);
             allocate_storage(new_capacity);
 #ifdef DEBUG
@@ -486,7 +450,7 @@ public:
         if (new_capacity <= capacity_) {
             new_capacity = capacity_;
         } else {
-            if (new_capacity <= detail::k_min_capacity) new_capacity = detail::k_min_capacity;
+            if (new_capacity <= k_min_capacity) new_capacity = k_min_capacity;
             else new_capacity = detail::next_power_of_two(new_capacity);
         }
 
@@ -521,7 +485,7 @@ public:
     const_iterator end() const noexcept { return cend(); }
     const_iterator cend() const noexcept { return const_iterator(this, capacity_); }
 
-    // 不检查是否在查找哨兵值
+    // TODO: find with hash
     iterator find(const key_type &key) noexcept { return iterator(this, index_of(key)); }
 
     const_iterator find(const key_type &key) const noexcept { return const_iterator(this, index_of(key)); }
@@ -711,7 +675,7 @@ public:
     // 覆盖已有值，若键不存在，dead loop
     template <typename M>
         requires(std::constructible_from<mapped_type, M>)
-    void overwrite(const key_type &key, M &&mapped) {
+    void overwrite(const key_type &key, M &&mapped) noexcept {
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
@@ -737,22 +701,22 @@ public:
 
     void insert(std::initializer_list<value_type> init) { insert(init.begin(), init.end()); }
 
-    size_type erase(const key_type &key) {
+    size_type erase(const key_type &key) noexcept {
         size_type index = index_of(key);
         if (index == capacity_) return 0;
         erase_at_index(index);
         return 1;
     }
 
-    void erase_exist(const key_type &key) { erase_at_index(index_of_exist(key)); }
+    void erase_exist(const key_type &key) noexcept { erase_at_index(index_of_exist(key)); }
 
     // 不检查 pos 是否指向合法槽位
-    iterator erase(const_iterator pos) {
+    iterator erase(const_iterator pos) noexcept {
         if (pos == cend()) return end();
         return erase_exist(pos);
     }
 
-    iterator erase_exist(const_iterator pos) {
+    iterator erase_exist(const_iterator pos) noexcept {
         size_type index = pos.index_;
         erase_at_index(index);
         iterator it(this, index);
@@ -773,9 +737,6 @@ public:
 #endif
 
 private:
-    static constexpr key_type k_unoccupied = std::numeric_limits<UInt32>::max();
-    static constexpr bool is_trivially_destructible_mapped = std::is_trivially_destructible_v<mapped_type>;
-
     hasher_type hasher_{};
     allocator_type alloc_{};
     slot_allocator_type slot_alloc_{};
@@ -806,7 +767,8 @@ private:
 
     size_type hash_of(const key_type &key) const noexcept { return hasher_(key); }
 
-    template <InsertPolicy Policy> auto make_result(size_type index, bool inserted) -> insert_return_type<Policy> {
+    template <InsertPolicy Policy>
+    auto make_result(size_type index, bool inserted) noexcept -> insert_return_type<Policy> {
         if constexpr (Policy::return_value) {
             if constexpr (Policy::check_dup) {
                 return {iterator(this, index), inserted};
@@ -822,6 +784,7 @@ private:
     // 如果要 find miss 快，则反过来
     // 当前这个版本，对于 find hit 最为友好，谨慎调整
     // 返回 capacity_ 代替 npos，减少外部分支
+    // TODO: 添加 index of with hash，用户可能缓存了 hash
     size_type index_of(const key_type &key) const noexcept {
 #ifdef DEBUG
         SizeT probe_len = 0;
@@ -830,14 +793,14 @@ private:
 #ifdef DEBUG
             ++probe_len;
 #endif
-            key_type stored = slots_[index].key;
-            if (stored == key) {
+            key_type stored_key = slots_[index].key;
+            if (stored_key == key) {
 #ifdef DEBUG
                 record_probe(probe_len);
 #endif
                 return index;
             }
-            if (stored == k_unoccupied) {
+            if (stored_key == k_unoccupied) {
 #ifdef DEBUG
                 record_probe(probe_len);
 #endif
@@ -854,8 +817,8 @@ private:
 #ifdef DEBUG
             ++probe_len;
 #endif
-            key_type stored = slots_[index].key;
-            if (stored == key) {
+            key_type stored_key = slots_[index].key;
+            if (stored_key == key) {
 #ifdef DEBUG
                 record_probe(probe_len);
 #endif
@@ -868,7 +831,7 @@ private:
         slots_ = slot_alloc_traits::allocate(slot_alloc_, capacity);
         mapped_values_ = mapped_alloc_traits::allocate(mapped_alloc_, capacity);
         capacity_ = capacity;
-        bucket_mask_ = capacity_ - 1;
+        bucket_mask_ = capacity - 1;
         growth_limit_ = static_cast<size_type>(max_load_factor_ * static_cast<float>(capacity_));
         std::memset(static_cast<void *>(slots_), static_cast<int>(k_unoccupied), capacity_ * sizeof(slot_type));
     }
@@ -886,7 +849,7 @@ private:
         }
     }
 
-    void move_old_elements(slot_type *old_slots, mapped_type *old_values, size_type old_capacity) {
+    void move_old_elements(slot_type *old_slots, mapped_type *old_mapped_values, size_type old_capacity) {
         for (size_type index = 0; index < old_capacity; ++index) {
             slot_type &old_slot = old_slots[index];
             key_type old_key = old_slot.key;
@@ -899,12 +862,12 @@ private:
             new_slot.key = old_key;
 
             // TODO: trivially 优化
-            std::construct_at(mapped_values_ + insert_index, std::move(old_values[index]));
+            std::construct_at(mapped_values_ + insert_index, std::move(old_mapped_values[index]));
             // std::destroy_at(old_slots + index);
-            if (!is_trivially_destructible_mapped) std::destroy_at(old_values + index);
+            if (!is_trivially_destructible_mapped) std::destroy_at(old_mapped_values + index);
         }
         slot_alloc_traits::deallocate(slot_alloc_, old_slots, old_capacity);
-        mapped_alloc_traits::deallocate(mapped_alloc_, old_values, old_capacity);
+        mapped_alloc_traits::deallocate(mapped_alloc_, old_mapped_values, old_capacity);
     }
 
     void double_storage() {
@@ -920,7 +883,7 @@ private:
     }
 
     // allocate storage 更新 bucket mask 后再调用
-    size_type rehash_index_of(const key_type &key) {
+    size_type rehash_index_of(const key_type &key) const noexcept {
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
@@ -959,7 +922,7 @@ private:
         --size_;
     }
 
-    friend bool operator==(const flat_map_u32 &lhs, const flat_map_u32 &rhs) {
+    friend bool operator==(const flat_map_u32 &lhs, const flat_map_u32 &rhs) noexcept {
         if (&lhs == &rhs) return true;
         if (lhs.size_ != rhs.size_) return false;
         if (lhs.size_ == 0) return true;

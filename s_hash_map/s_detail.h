@@ -12,7 +12,6 @@ using control_t = UInt8; // 控制字节
 inline constexpr control_t k_empty = static_cast<control_t>(-128); // 0x80 EMPTY
 // inline constexpr control_t k_deleted = static_cast<control_t>(-2); // 0xFE DELETED [[deprecated]]
 inline constexpr control_t k_sentinel = static_cast<control_t>(-1); // 0xFF SENTINAL
-inline constexpr UInt32 k_min_capacity = 8;                         // 逻辑允许最大元素数量 = capacity * max load factor
 inline constexpr float k_default_max_load_factor = 0.75f;
 inline constexpr int k_group_width = 16; // 一组 16 个 control_t
 

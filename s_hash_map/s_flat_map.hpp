@@ -47,6 +47,7 @@ public:
     using allocator_type = Alloc;
 
 private:
+    static constexpr size_type k_min_capacity = 8;
     static constexpr bool k_store_hash = detail::k_store_hash<key_type, hasher_type>;
 
     struct SlotHashStorage {
@@ -354,7 +355,7 @@ public:
     void reserve(size_type new_size) {
         float need = static_cast<float>(new_size) / max_load_factor_;
         size_type min_capacity = static_cast<size_type>(std::ceil(need));
-        if (min_capacity < detail::k_min_capacity) min_capacity = detail::k_min_capacity;
+        if (min_capacity < k_min_capacity) min_capacity = k_min_capacity;
         // 这里不需要 next power of two，rehash 里会调用
         if (min_capacity <= capacity_) return;
         rehash(min_capacity);
@@ -375,7 +376,7 @@ public:
         }
         // 有活跃元素
         size_type new_capacity = static_cast<size_type>(std::ceil(static_cast<float>(size_) / max_load_factor_));
-        if (new_capacity <= detail::k_min_capacity) new_capacity = detail::k_min_capacity;
+        if (new_capacity <= k_min_capacity) new_capacity = k_min_capacity;
         else new_capacity = detail::next_power_of_two(new_capacity);
 
         if (new_capacity == capacity_) return;
@@ -423,7 +424,7 @@ public:
         // 原本无 storage
         if (capacity_ == 0) {
             if (new_capacity == 0) return; // 空 map rehash 0
-            if (new_capacity <= detail::k_min_capacity) new_capacity = detail::k_min_capacity;
+            if (new_capacity <= k_min_capacity) new_capacity = k_min_capacity;
             else new_capacity = detail::next_power_of_two(new_capacity);
             allocate_storage(new_capacity);
 #ifdef DEBUG
@@ -446,7 +447,7 @@ public:
 #endif
                 return;
             }
-            if (new_capacity <= detail::k_min_capacity) new_capacity = detail::k_min_capacity;
+            if (new_capacity <= k_min_capacity) new_capacity = k_min_capacity;
             else new_capacity = detail::next_power_of_two(new_capacity);
             allocate_storage(new_capacity); // 内部更新 capacity_ = new_capacity，controls_ 和 slot_
 #ifdef DEBUG
@@ -459,7 +460,7 @@ public:
         if (new_capacity <= capacity_) {
             new_capacity = capacity_;
         } else {
-            if (new_capacity <= detail::k_min_capacity) new_capacity = detail::k_min_capacity;
+            if (new_capacity <= k_min_capacity) new_capacity = k_min_capacity;
             else new_capacity = detail::next_power_of_two(new_capacity);
         }
 
@@ -718,7 +719,7 @@ private:
     template <typename K>
         requires(std::constructible_from<key_type, K>) // 开头已限制 mapped type 可默认构造
     size_type find_or_insert_default(K &&key, size_type hash_result, control_t short_hash_result) {
-        if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
+        if (capacity_ == 0) allocate_storage(k_min_capacity);
         // 可能触发扩容，不得不先看 key 是否存在
         if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
             // size_type existing = robin_hood_find(key, hash_result, short_hash_result);
@@ -800,7 +801,7 @@ private:
 
     // 接收右值 kv，若 key 已经存在，返回 kv 索引 + false，否则插入新 kv 返回 insert index + true，并更新 size_
     std::pair<size_type, bool> find_or_insert_kv(size_type hash_result, control_t short_hash_result, value_type &&kv) {
-        if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
+        if (capacity_ == 0) allocate_storage(k_min_capacity);
         if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
             // size_type existing = robin_hood_find(kv.first, hash_result, short_hash_result);
             size_type existing = simple_find(kv.first, hash_result, short_hash_result);
@@ -875,7 +876,7 @@ private:
     std::pair<size_type, bool> insert_or_assign(size_type hash_result, control_t short_hash_result, K &&key,
                                                 M &&mapped) {
 
-        if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
+        if (capacity_ == 0) allocate_storage(k_min_capacity);
         if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
             // size_type existing = robin_hood_find(key, hash_result, short_hash_result);
             size_type existing = simple_find(key, hash_result, short_hash_result);
@@ -970,7 +971,7 @@ private:
         requires(std::constructible_from<key_type, K> && std::constructible_from<mapped_type, Args...>)
     std::pair<size_type, bool> find_or_try_emplace(size_type hash_result, control_t short_hash_result, K &&key,
                                                    Args &&...args) {
-        if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
+        if (capacity_ == 0) allocate_storage(k_min_capacity);
         if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
             // size_type existing = robin_hood_find(key, hash_result, short_hash_result);
             size_type existing = simple_find(key, hash_result, short_hash_result);
