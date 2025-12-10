@@ -50,6 +50,7 @@ int main() {
 - 扩容相关操作（insert/emplace/try_emplace/insert_or_assign 在达到 max_load_factor、显式reserve/rehash/shrink_to_fit）会重新分配，全部迭代器/引用都会失效。
 - erase 采用后移补洞，会使被删元素及同簇后续元素的迭代器失效；不会自动收缩，需要手动 shrink_to_fit。
 - 线程不安全；DEBUG 打开后会记录探测长度与 rehash 计数。
+补充：为了减少 capacity == 0 的检查，map 创建后自动占用一些空间，可以在创建的时候显式传入 init_size = 0 来避免占用任何空间，但是后续插入元素的时候需要自行 reserve 或者 rehash，否则 UB
 
 ## 测试与基准
 - 单测与基准位于 tests/、bench/，可参考根目录 CMakeLists.txt 配置。

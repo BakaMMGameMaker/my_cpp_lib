@@ -1,3 +1,4 @@
+#include "s_alias.h"
 #include "s_flat_map_u32.hpp"
 #include <array>
 #include <benchmark/benchmark.h>
@@ -17,7 +18,7 @@ using Key = std::uint32_t;
 // 只测 random 分布即可
 enum class KeyDistribution : std::uint32_t { kRandom = 0 };
 
-constexpr std::array<std::size_t, 3> kSizes = {1u << 10, 1u << 14, 1u << 18};
+constexpr std::array<UInt32, 3> kSizes = {1u << 10, 1u << 14, 1u << 18};
 constexpr std::array<float, 2> kLoadFactors = {0.75f, 0.875f};
 
 template <class Map> void apply_max_load_factor(Map &map, float max_load_factor) {
@@ -38,11 +39,11 @@ std::string build_label(float load_factor) {
 
 // ----------------- 数据集：唯一键 -----------------
 
-template <typename K> std::vector<K> make_unique_keys(std::size_t N, std::uint64_t seed = 123456) {
+template <typename K> std::vector<K> make_unique_keys(UInt32 N, std::uint64_t seed = 123456) {
     static_assert(std::is_integral_v<K>, "random keys require integral types");
     std::vector<K> keys;
     keys.reserve(N);
-    for (std::size_t i = 0; i < N; ++i) {
+    for (UInt32 i = 0; i < N; ++i) {
         keys.push_back(static_cast<K>(i)); // 先唯一
     }
     std::mt19937_64 rng(seed);
@@ -88,7 +89,7 @@ struct unique_noreserve_noret_policy {
 // --- std::unordered_map: reserve 版本 ---
 
 static void BM_InsertUnique_std_reserve(benchmark::State &state, float max_load_factor) {
-    const std::size_t N = static_cast<std::size_t>(state.range(0));
+    const UInt32 N = static_cast<UInt32>(state.range(0));
     const auto keys = make_unique_keys<Key>(N);
 
     const auto label = build_label(max_load_factor);
@@ -98,7 +99,7 @@ static void BM_InsertUnique_std_reserve(benchmark::State &state, float max_load_
         apply_max_load_factor(map, max_load_factor);
         map.reserve(N); // 尽量避免 rehash
 
-        for (std::size_t i = 0; i < N; ++i) {
+        for (UInt32 i = 0; i < N; ++i) {
             auto res = map.emplace(keys[i], static_cast<std::uint32_t>(i));
             benchmark::DoNotOptimize(res);
         }
@@ -113,7 +114,7 @@ static void BM_InsertUnique_std_reserve(benchmark::State &state, float max_load_
 // --- std::unordered_map: no reserve 版本 ---
 
 static void BM_InsertUnique_std_noreserve(benchmark::State &state, float max_load_factor) {
-    const std::size_t N = static_cast<std::size_t>(state.range(0));
+    const UInt32 N = static_cast<UInt32>(state.range(0));
     const auto keys = make_unique_keys<Key>(N);
 
     const auto label = build_label(max_load_factor);
@@ -123,7 +124,7 @@ static void BM_InsertUnique_std_noreserve(benchmark::State &state, float max_loa
         apply_max_load_factor(map, max_load_factor);
         // 不 reserve，交给 std 自己扩容
 
-        for (std::size_t i = 0; i < N; ++i) {
+        for (UInt32 i = 0; i < N; ++i) {
             auto res = map.emplace(keys[i], static_cast<std::uint32_t>(i));
             benchmark::DoNotOptimize(res);
         }
@@ -138,7 +139,7 @@ static void BM_InsertUnique_std_noreserve(benchmark::State &state, float max_loa
 // --- fmu32: reserve + 停止 rehash，有返回值 ---
 
 static void BM_InsertUnique_fmu32_reserve_ret(benchmark::State &state, float max_load_factor) {
-    const std::size_t N = static_cast<std::size_t>(state.range(0));
+    const UInt32 N = static_cast<UInt32>(state.range(0));
     const auto keys = make_unique_keys<Key>(N);
 
     const auto label = build_label(max_load_factor);
@@ -148,7 +149,7 @@ static void BM_InsertUnique_fmu32_reserve_ret(benchmark::State &state, float max
         apply_max_load_factor(map, max_load_factor);
         map.reserve(N); // 一次性预留足够容量
 
-        for (std::size_t i = 0; i < N; ++i) {
+        for (UInt32 i = 0; i < N; ++i) {
             auto res = map.template emplace<unique_reserve_ret_policy>(keys[i], static_cast<std::uint32_t>(i));
             benchmark::DoNotOptimize(res);
         }
@@ -163,7 +164,7 @@ static void BM_InsertUnique_fmu32_reserve_ret(benchmark::State &state, float max
 // --- fmu32: reserve + 停止 rehash，无返回值 ---
 
 static void BM_InsertUnique_fmu32_reserve_noret(benchmark::State &state, float max_load_factor) {
-    const std::size_t N = static_cast<std::size_t>(state.range(0));
+    const UInt32 N = static_cast<UInt32>(state.range(0));
     const auto keys = make_unique_keys<Key>(N);
 
     const auto label = build_label(max_load_factor);
@@ -173,7 +174,7 @@ static void BM_InsertUnique_fmu32_reserve_noret(benchmark::State &state, float m
         apply_max_load_factor(map, max_load_factor);
         map.reserve(N);
 
-        for (std::size_t i = 0; i < N; ++i) {
+        for (UInt32 i = 0; i < N; ++i) {
             map.template emplace<unique_reserve_noret_policy>(keys[i], static_cast<std::uint32_t>(i));
         }
 
@@ -187,7 +188,7 @@ static void BM_InsertUnique_fmu32_reserve_noret(benchmark::State &state, float m
 // --- fmu32: no reserve + 允许 rehash，有返回值 ---
 
 static void BM_InsertUnique_fmu32_noreserve_ret(benchmark::State &state, float max_load_factor) {
-    const std::size_t N = static_cast<std::size_t>(state.range(0));
+    const UInt32 N = static_cast<UInt32>(state.range(0));
     const auto keys = make_unique_keys<Key>(N);
 
     const auto label = build_label(max_load_factor);
@@ -197,7 +198,7 @@ static void BM_InsertUnique_fmu32_noreserve_ret(benchmark::State &state, float m
         apply_max_load_factor(map, max_load_factor);
         // 不 reserve，依赖内部 rehash 逻辑
 
-        for (std::size_t i = 0; i < N; ++i) {
+        for (UInt32 i = 0; i < N; ++i) {
             auto res = map.template emplace<unique_noreserve_ret_policy>(keys[i], static_cast<std::uint32_t>(i));
             benchmark::DoNotOptimize(res);
         }
@@ -212,7 +213,7 @@ static void BM_InsertUnique_fmu32_noreserve_ret(benchmark::State &state, float m
 // --- fmu32: no reserve + 允许 rehash，无返回值 ---
 
 static void BM_InsertUnique_fmu32_noreserve_noret(benchmark::State &state, float max_load_factor) {
-    const std::size_t N = static_cast<std::size_t>(state.range(0));
+    const UInt32 N = static_cast<UInt32>(state.range(0));
     const auto keys = make_unique_keys<Key>(N);
 
     const auto label = build_label(max_load_factor);
@@ -221,7 +222,7 @@ static void BM_InsertUnique_fmu32_noreserve_noret(benchmark::State &state, float
         fmu32 map;
         apply_max_load_factor(map, max_load_factor);
 
-        for (std::size_t i = 0; i < N; ++i) {
+        for (UInt32 i = 0; i < N; ++i) {
             map.template emplace<unique_noreserve_noret_policy>(keys[i], static_cast<std::uint32_t>(i));
         }
 

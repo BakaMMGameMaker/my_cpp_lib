@@ -40,7 +40,7 @@ public:
     using key_type = KeyType;
     using mapped_type = ValueType;
     using value_type = std::pair<KeyType, ValueType>;
-    using size_type = SizeT;
+    using size_type = UInt32;
     using difference_type = std::ptrdiff_t;
     using hasher_type = HasherType;
     using key_equal_type = KeyEqualType;
@@ -50,7 +50,7 @@ private:
     static constexpr bool k_store_hash = detail::k_store_hash<key_type, hasher_type>;
 
     struct SlotHashStorage {
-        SizeT hash;
+        size_type hash;
     };
 
     struct SlotNoHashStorage {};
@@ -502,7 +502,7 @@ public:
     // 返回指向给定键值对的迭代器
     iterator find(const key_type &key) noexcept {
         if (!controls_ || size_ == 0) return end();
-        SizeT hash_result = hash_key(key);
+        size_type hash_result = hash_key(key);
         if constexpr (k_small_int_key) {
             size_type index = simple_find_int(key, hash_result);
             if (index == npos) return end();
@@ -519,7 +519,7 @@ public:
     // 返回指向给定键值对的迭代器
     const_iterator find(const key_type &key) const noexcept {
         if (!controls_ || size_ == 0) return cend();
-        SizeT hash_result = hash_key(key);
+        size_type hash_result = hash_key(key);
         if constexpr (k_small_int_key) {
             size_type index = simple_find_int(key, hash_result);
             if (index == npos) return cend();
@@ -548,7 +548,7 @@ public:
 
     // 不存在的 key 自动 emplace 一个默认值
     mapped_type &operator[](const key_type &key) {
-        SizeT hash_result = hash_key(key);
+        size_type hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
         size_type index = find_or_insert_default(key, hash_result, short_hash_result);
         return slots_[index].kv.second;
@@ -556,7 +556,7 @@ public:
 
     // 右值版本，不是万能引用
     mapped_type &operator[](key_type &&key) {
-        SizeT hash_result = hash_key(key);
+        size_type hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
         size_type index = find_or_insert_default(std::move(key), hash_result, short_hash_result);
         return slots_[index].kv.second;
@@ -567,7 +567,7 @@ public:
 
     // 尝试插入给定的键值对，返回指向键值对的迭代器以及是否为新的键值对（右值版本）
     std::pair<iterator, bool> insert(value_type &&kv) {
-        SizeT hash_result = hash_key(kv.first);
+        size_type hash_result = hash_key(kv.first);
         control_t short_hash_result = detail::short_hash(hash_result);
         auto [index, inserted] = find_or_insert_kv(hash_result, short_hash_result, std::move(kv));
         return {iterator(this, index), inserted};
@@ -577,7 +577,7 @@ public:
     template <typename K, typename M>
         requires(std::constructible_from<key_type, K> && std::constructible_from<mapped_type, M>)
     std::pair<iterator, bool> insert_or_assign(K &&key, M &&mapped) {
-        SizeT hash_result = hash_key(key);
+        size_type hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
         auto [index, inserted] =
             insert_or_assign(hash_result, short_hash_result, std::forward<K>(key), std::forward<M>(mapped));
@@ -588,7 +588,7 @@ public:
     template <typename K, typename M>
         requires(std::constructible_from<key_type, K> && std::constructible_from<mapped_type, M>)
     std::pair<iterator, bool> emplace(K &&key, M &&mapped) {
-        SizeT hash_result = hash_key(key);
+        size_type hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
         value_type kv{std::forward<K>(key), std::forward<M>(mapped)};
         auto [index, inserted] = find_or_insert_kv(hash_result, short_hash_result, std::move(kv));
@@ -599,7 +599,7 @@ public:
     template <typename K, typename... Args>
         requires(std::same_as<std::remove_cvref_t<K>, key_type> && std::constructible_from<mapped_type, Args...>)
     std::pair<iterator, bool> try_emplace(K &&key, Args &&...args) {
-        SizeT hash_result = hash_key(key);
+        size_type hash_result = hash_key(key);
         control_t short_hash_result = detail::short_hash(hash_result);
         auto [index, inserted] =
             find_or_try_emplace(hash_result, short_hash_result, std::forward<K>(key), std::forward<Args>(args)...);
@@ -619,7 +619,7 @@ public:
     // 返回删除了几个元素
     size_type erase(const key_type &key) {
         if (!controls_ || size_ == 0) return 0;
-        SizeT hash_result = hash_key(key);
+        size_type hash_result = hash_key(key);
         size_type index;
         if constexpr (k_small_int_key) {
             index = simple_find_int(key, hash_result);
@@ -696,14 +696,14 @@ private:
     }
 #endif
 
-    SizeT hash_key(const key_type &key) const noexcept { return hasher_(key); }
+    size_type hash_key(const key_type &key) const noexcept { return static_cast<size_type>(hasher_(key)); }
 
-    SizeT get_slot_hash(const Slot &slot) const noexcept {
+    size_type get_slot_hash(const Slot &slot) const noexcept {
         if constexpr (k_store_hash) return slot.hash;
         else return hash_key(slot.kv.first); // for cheap hash
     }
 
-    void set_slot_hash(Slot &slot, SizeT hash) noexcept {
+    void set_slot_hash(Slot &slot, size_type hash) noexcept {
         if constexpr (k_store_hash) {
             slot.hash = hash;
         } else {
@@ -717,7 +717,7 @@ private:
     // - 若 key 不存在，否则 robin hood 规则插入 {key, default} 并更新 size_
     template <typename K>
         requires(std::constructible_from<key_type, K>) // 开头已限制 mapped type 可默认构造
-    size_type find_or_insert_default(K &&key, SizeT hash_result, control_t short_hash_result) {
+    size_type find_or_insert_default(K &&key, size_type hash_result, control_t short_hash_result) {
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
         // 可能触发扩容，不得不先看 key 是否存在
         if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
@@ -732,7 +732,7 @@ private:
         alignas(value_type) UChar cur_kv_storage[sizeof(value_type)];
         value_type *cur_kv = nullptr;
 
-        SizeT cur_hash = hash_result;
+        size_type cur_hash = hash_result;
         control_t cur_ctrl = short_hash_result;
         bool need_check_duplicate = true; // 仍需要查找重复键
 #ifdef DEBUG
@@ -780,7 +780,7 @@ private:
                                                std::forward_as_tuple(std::forward<K>(key)), std::forward_as_tuple());
                 }
                 value_type tmp_kv = std::move(slot_ref.kv);
-                SizeT tmp_hash = get_slot_hash(slot_ref);
+                size_type tmp_hash = get_slot_hash(slot_ref);
                 control_t tmp_ctrl = ctrl_ref;
 
                 slot_ref.kv = std::move(*cur_kv);
@@ -799,7 +799,7 @@ private:
     }
 
     // 接收右值 kv，若 key 已经存在，返回 kv 索引 + false，否则插入新 kv 返回 insert index + true，并更新 size_
-    std::pair<size_type, bool> find_or_insert_kv(SizeT hash_result, control_t short_hash_result, value_type &&kv) {
+    std::pair<size_type, bool> find_or_insert_kv(size_type hash_result, control_t short_hash_result, value_type &&kv) {
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
         if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
             // size_type existing = robin_hood_find(kv.first, hash_result, short_hash_result);
@@ -811,7 +811,7 @@ private:
         size_type index = static_cast<size_type>(hash_result) & bucket_mask_;
         size_type dist = 0;
         value_type cur_kv = std::move(kv);
-        SizeT cur_hash = hash_result;
+        size_type cur_hash = hash_result;
         control_t cur_ctrl = short_hash_result;
         bool need_check_duplicate = true;
 #ifdef DEBUG
@@ -849,7 +849,7 @@ private:
                 need_check_duplicate = false;
 
                 value_type tmp_kv = std::move(slot_ref.kv);
-                SizeT tmp_hash = get_slot_hash(slot_ref);
+                size_type tmp_hash = get_slot_hash(slot_ref);
                 control_t tmp_ctrl = ctrl_ref;
 
                 slot_ref.kv = std::move(cur_kv);
@@ -872,7 +872,8 @@ private:
     // - 若 key 不存在：按 robin hood 规则插入 {key, mapped}，返回 {index, true}
     template <typename K, typename M>
         requires(std::same_as<std::remove_cvref_t<K>, key_type> && std::convertible_to<M, mapped_type>)
-    std::pair<size_type, bool> insert_or_assign(SizeT hash_result, control_t short_hash_result, K &&key, M &&mapped) {
+    std::pair<size_type, bool> insert_or_assign(size_type hash_result, control_t short_hash_result, K &&key,
+                                                M &&mapped) {
 
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
         if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
@@ -891,7 +892,7 @@ private:
         alignas(value_type) unsigned char cur_kv_storage[sizeof(value_type)];
         value_type *cur_kv = nullptr;
 
-        SizeT cur_hash = hash_result;
+        size_type cur_hash = hash_result;
         control_t cur_ctrl = short_hash_result;
         bool need_check_duplicate = true;
 #ifdef DEBUG
@@ -944,7 +945,7 @@ private:
                                                std::forward_as_tuple(std::forward<M>(mapped)));
                 }
                 value_type tmp_kv = std::move(slot_ref.kv);
-                SizeT tmp_hash = get_slot_hash(slot_ref);
+                size_type tmp_hash = get_slot_hash(slot_ref);
                 control_t tmp_ctrl = ctrl_ref;
 
                 slot_ref.kv = std::move(*cur_kv);
@@ -967,7 +968,7 @@ private:
     // - 若 key 不存在，按 robin hood 规则插入，并在真正需要时才构造 value_type 并更新 size_
     template <typename K, typename... Args>
         requires(std::constructible_from<key_type, K> && std::constructible_from<mapped_type, Args...>)
-    std::pair<size_type, bool> find_or_try_emplace(SizeT hash_result, control_t short_hash_result, K &&key,
+    std::pair<size_type, bool> find_or_try_emplace(size_type hash_result, control_t short_hash_result, K &&key,
                                                    Args &&...args) {
         if (capacity_ == 0) allocate_storage(detail::k_min_capacity);
         if (static_cast<float>(size_ + 1) > max_load_factor_ * static_cast<float>(capacity_)) {
@@ -983,7 +984,7 @@ private:
         alignas(value_type) unsigned char cur_kv_storage[sizeof(value_type)];
         value_type *cur_kv = nullptr;
 
-        SizeT cur_hash = hash_result;
+        size_type cur_hash = hash_result;
         control_t cur_ctrl = short_hash_result;
         bool need_check_duplicate = true;
 #ifdef DEBUG
@@ -1031,7 +1032,7 @@ private:
                                                std::forward_as_tuple(std::forward<Args>(args)...));
                 }
                 value_type tmp_kv = std::move(slot_ref.kv);
-                SizeT tmp_hash = get_slot_hash(slot_ref);
+                size_type tmp_hash = get_slot_hash(slot_ref);
                 control_t tmp_ctrl = ctrl_ref;
 
                 slot_ref.kv = std::move(*cur_kv);
@@ -1086,8 +1087,8 @@ private:
             control_t control_byte = old_controls[index];
             if (control_byte == detail::k_empty) continue;
             value_type &kv = old_slots[index].kv;
-            // SizeT hash_result = hash_key(kv.first); // 注意，需要测试究竟是再算一次更快，还是取 Slot 中值更快
-            SizeT hash_result = get_slot_hash(old_slots[index]);
+            // size_type hash_result = hash_key(kv.first); // 注意，需要测试究竟是再算一次更快，还是取 Slot 中值更快
+            size_type hash_result = get_slot_hash(old_slots[index]);
             // active slot 下，short hash result = control byte
             size_type insert_index = find_insert_index_for_rehash(hash_result);
             emplace_at_index(insert_index, hash_result, control_byte, std::move(kv.first), std::move(kv.second));
@@ -1115,7 +1116,7 @@ private:
     // u32 / u64 等小整型 key 专用查找路径：
     // 不用 short hash，不用 SIMD，只做线性探测 + 直接 key 比较
     // 回归 control byte + SIMD 和 prefetch 都开性能倒车
-    size_type simple_find_int(const key_type &key, SizeT hash_result) const noexcept {
+    size_type simple_find_int(const key_type &key, size_type hash_result) const noexcept {
         if (capacity_ == 0) return npos;
         size_type index = static_cast<size_type>(hash_result) & bucket_mask_;
 #ifdef DEBUG
@@ -1156,7 +1157,8 @@ private:
     }
 
     // 小表，不走 SIMD
-    size_type simple_find_small(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
+    size_type simple_find_small(const key_type &key, size_type hash_result,
+                                control_t short_hash_result) const noexcept {
         size_type index = static_cast<size_type>(hash_result) & bucket_mask_;
 #ifdef DEBUG
         SizeT probe_len = 0;
@@ -1185,7 +1187,7 @@ private:
 
     // 提供哈希值和控制字节，返回 key 的 index，不存在则返回 npos，不利用早停机制
     // 还没 umap 一半快，而且 avx2，early exist 等手段全部负收益
-    size_type simple_find(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
+    size_type simple_find(const key_type &key, size_type hash_result, control_t short_hash_result) const noexcept {
         if (capacity_ == 0) return npos;
 
         // capacity < 64 暴力线性扫描
@@ -1276,7 +1278,7 @@ private:
     }
 
     // 提供哈希值和控制字节，返回 key 的 index，不存在则返回 npos
-    size_type robin_hood_find(const key_type &key, SizeT hash_result, control_t short_hash_result) const noexcept {
+    size_type robin_hood_find(const key_type &key, size_type hash_result, control_t short_hash_result) const noexcept {
         // 除了仅找 key 是否存在的环节别用，节省性能
         if (capacity_ == 0) return npos;
         size_type home = static_cast<size_type>(hash_result) & bucket_mask_; // 探测起点
@@ -1330,7 +1332,7 @@ private:
     // rehash 搬迁元素专用，allocate_storage 更新 capacity_ 后使用，确保 capacity_ > 0 再调用
     // 不会破坏 robin hood probing 探测链，由于不再有墓碑，每个 cluster 都是多个 FULL 紧挨在一起
     // 具体来讲，线性搬迁确保每个元素都在它 home 的右手边，也不会让多个 cluster 混一起，因此安全
-    size_type find_insert_index_for_rehash(SizeT hash_result) {
+    size_type find_insert_index_for_rehash(size_type hash_result) {
         size_type index = static_cast<size_type>(hash_result) & bucket_mask_;
 #ifdef DEBUG
         SizeT probe_len = 0;
@@ -1354,7 +1356,7 @@ private:
     // 在指定位置上填充哈希值，控制字节，并构造 kv，不更新 size_
     template <typename K, typename M>
         requires(std::constructible_from<key_type, K> && std::constructible_from<mapped_type, M>)
-    void emplace_at_index(size_type index, SizeT hash_result, control_t short_hash_result, K &&key, M &&mapped) {
+    void emplace_at_index(size_type index, size_type hash_result, control_t short_hash_result, K &&key, M &&mapped) {
         std::construct_at(std::addressof(slots_[index].kv),
                           std::piecewise_construct,                    // 分片构造
                           std::forward_as_tuple(std::forward<K>(key)), //
@@ -1372,7 +1374,7 @@ private:
             size_type next = (cur + 1) & bucket_mask_;
             control_t control_byte = controls_[next];
             if (control_byte == detail::k_empty) break;
-            SizeT next_hash = get_slot_hash(slots_[next]);
+            size_type next_hash = get_slot_hash(slots_[next]);
             size_type home = static_cast<size_type>(next_hash) & bucket_mask_;
             size_type dist_from_home = (next + capacity_ - home) & bucket_mask_;
             // dist from home = 0 说明是 next cluster，不能左移破坏 probing 链

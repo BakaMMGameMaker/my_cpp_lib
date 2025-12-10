@@ -13,12 +13,12 @@
 
 struct bad_hash_u32 {
     using is_transparent = void;
-    SizeT operator()(UInt32) const noexcept { return 0xdeadbeefu; }
+    UInt32 operator()(UInt32) const noexcept { return 0xdeadbeefu; }
 };
 
 struct bad_hash_u64 {
     using is_transparent = void;
-    SizeT operator()(UInt64) const noexcept { return 0xdeadbeefu; }
+    UInt32 operator()(UInt64) const noexcept { return 0xdeadbeefu; }
 };
 
 struct AllocStats {

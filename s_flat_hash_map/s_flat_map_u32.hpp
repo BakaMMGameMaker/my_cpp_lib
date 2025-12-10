@@ -56,7 +56,7 @@ public:
     using key_type = UInt32;
     using mapped_type = MappedType;
     using value_type = std::pair<const key_type, mapped_type>;
-    using size_type = SizeT;
+    using size_type = UInt32;
     using difference_type = std::ptrdiff_t;
     using hasher_type = HasherType;
     using key_equal_type = std::equal_to<key_type>;
@@ -236,12 +236,6 @@ private:
     using insert_return_type =
         std::conditional_t<Policy::return_value,
                            std::conditional_t<Policy::check_dup, std::pair<iterator, bool>, iterator>, void>;
-
-    // find or insert kv 返回类型
-    template <InsertPolicy Policy>
-    using find_or_insert_kv_return_type =
-        std::conditional_t<Policy::return_value,
-                           std::conditional_t<Policy::check_dup, std::pair<size_type, bool>, size_type>, void>;
 
 public:
     explicit flat_map_u32(size_type init_size = 1, const Alloc &alloc = Alloc{})
@@ -560,8 +554,7 @@ public:
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
-        for (size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;;
-             index = (index + 1) & bucket_mask_) {
+        for (size_type index = hash_of(key) & bucket_mask_;; index = (index + 1) & bucket_mask_) {
 #ifdef DEBUG
             ++probe_len;
 #endif
@@ -609,8 +602,7 @@ public:
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
-        for (size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;;
-             index = (index + 1) & bucket_mask_) {
+        for (size_type index = hash_of(key) & bucket_mask_;; index = (index + 1) & bucket_mask_) {
 #ifdef DEBUG
             ++probe_len;
 #endif
@@ -651,8 +643,7 @@ public:
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
-        for (size_type index = static_cast<size_type>(hash_of(key) & bucket_mask_);;
-             index = (index + 1) & bucket_mask_) {
+        for (size_type index = hash_of(key) & bucket_mask_;; index = (index + 1) & bucket_mask_) {
 #ifdef DEBUG
             ++probe_len;
 #endif
@@ -691,8 +682,7 @@ public:
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
-        for (size_type index = static_cast<size_type>(hash_of(key) & bucket_mask_);;
-             index = (index + 1) & bucket_mask_) {
+        for (size_type index = hash_of(key) & bucket_mask_;; index = (index + 1) & bucket_mask_) {
 #ifdef DEBUG
             ++probe_len;
 #endif
@@ -725,8 +715,7 @@ public:
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
-        for (size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;;
-             index = (index + 1) & bucket_mask_) {
+        for (size_type index = hash_of(key) & bucket_mask_;; index = (index + 1) & bucket_mask_) {
 #ifdef DEBUG
             ++probe_len;
 #endif
@@ -759,7 +748,7 @@ public:
 
     // 不检查 pos 是否指向合法槽位
     iterator erase(const_iterator pos) {
-        if (pos == end()) return end();
+        if (pos == cend()) return end();
         return erase_exist(pos);
     }
 
@@ -815,7 +804,7 @@ private:
     }
 #endif
 
-    SizeT hash_of(const key_type &key) const noexcept { return hasher_(key); }
+    size_type hash_of(const key_type &key) const noexcept { return hasher_(key); }
 
     template <InsertPolicy Policy> auto make_result(size_type index, bool inserted) -> insert_return_type<Policy> {
         if constexpr (Policy::return_value) {
@@ -837,8 +826,7 @@ private:
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
-        for (size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;;
-             index = (index + 1) & bucket_mask_) {
+        for (size_type index = hash_of(key) & bucket_mask_;; index = (index + 1) & bucket_mask_) {
 #ifdef DEBUG
             ++probe_len;
 #endif
@@ -862,8 +850,7 @@ private:
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
-        for (size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;;
-             index = (index + 1) & bucket_mask_) {
+        for (size_type index = hash_of(key) & bucket_mask_;; index = (index + 1) & bucket_mask_) {
 #ifdef DEBUG
             ++probe_len;
 #endif
@@ -937,8 +924,7 @@ private:
 #ifdef DEBUG
         SizeT probe_len = 0;
 #endif
-        for (size_type index = static_cast<size_type>(hash_of(key)) & bucket_mask_;;
-             index = (index + 1) & bucket_mask_) {
+        for (size_type index = hash_of(key) & bucket_mask_;; index = (index + 1) & bucket_mask_) {
 #ifdef DEBUG
             ++probe_len;
 #endif
@@ -960,8 +946,8 @@ private:
             key_type next_key = next_slot.key;
             if (next_key == k_unoccupied) break; // 遇到 EMPTY
 
-            SizeT next_hash = hash_of(next_key);
-            size_type home = static_cast<size_type>(next_hash) & bucket_mask_;
+            size_type next_hash = hash_of(next_key);
+            size_type home = next_hash & bucket_mask_;
             if (home == next_index) break; // 下一个元素在自己家上，不要左移
 
             slots_[cur_index].key = next_key;

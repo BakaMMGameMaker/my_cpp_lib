@@ -1,3 +1,4 @@
+#include "s_alias.h"
 #include "s_flat_map.hpp"
 #include "s_flat_map_u32.hpp"
 #include <algorithm>
@@ -185,7 +186,7 @@ template <class Key> IntDataset<Key> prepare_int_dataset(KeyDistribution dist, s
 }
 
 template <class Map, class Key> void fill_map_with_keys(Map &map, const std::vector<Key> &keys) {
-    map.reserve(keys.size());
+    map.reserve(static_cast<UInt32>(keys.size()));
     for (std::size_t i = 0; i < keys.size(); ++i) { map.emplace(keys[i], static_cast<std::uint32_t>(i)); }
 }
 

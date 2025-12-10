@@ -141,7 +141,7 @@ inline void bench_emplace_like(Map &map, const typename Map::key_type &key, std:
 }
 
 template <bool UseNoIter, class Map, class Key> void fill_map_with_keys(Map &map, const std::vector<Key> &keys) {
-    map.reserve(keys.size());
+    map.reserve(static_cast<UInt32>(keys.size()));
     for (std::size_t i = 0; i < keys.size(); ++i) {
         bench_emplace_like<UseNoIter>(map, keys[i], static_cast<std::uint32_t>(i));
     }
