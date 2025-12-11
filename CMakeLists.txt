@@ -58,6 +58,10 @@ add_executable(test_fmu32
     s_hash_map/tests/test_fmu32.cpp
 )
 
+add_executable(test_bmu32
+    s_hash_map/tests/test_bmu32.cpp
+)
+
 # =====================================================
 #                Benchmark Target Helper
 # =====================================================

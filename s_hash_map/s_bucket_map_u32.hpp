@@ -4,7 +4,6 @@
 #include "s_hash_map_policy.hpp"
 #include <cmath>
 #include <cstring>
-#include <exception>
 #include <memory>
 #include <stdexcept>
 #include <type_traits>
@@ -269,7 +268,7 @@ private:
             key_type stored_key = bucket.keys[slot_index];
             if (stored_key == key) return {bucket_index, slot_index};
         }
-        std::terminate();
+        throw std::out_of_range("bucket_map_u32::index_of_exist: key does not exist");
     }
 
     void erase_at(size_type bucket_index, size_type slot_index) noexcept {
@@ -341,6 +340,7 @@ private:
                 std::destroy_at(mapped_values_ + index);
             }
         }
+        size_ = 0;
     }
 
     void move_old_elements(Bucket *old_buckets, mapped_type *old_mapped_values, size_type old_bucket_count) {
@@ -409,7 +409,7 @@ private:
     }
 
 public:
-    explicit bucket_map_u32(size_type init_size = 1, const Alloc &alloc = Alloc{})
+    bucket_map_u32(size_type init_size = 1, const Alloc &alloc = Alloc{})
         : hasher_(), alloc_(alloc), bucket_alloc_(alloc_), mapped_alloc_(alloc_) {
         reserve(init_size);
     }
@@ -577,6 +577,7 @@ public:
     size_type size() const noexcept { return size_; }
     size_type capacity() const noexcept { return capacity_; }
     size_type bucket_count() const noexcept { return bucket_count_; }
+    size_type growth_limit() const noexcept { return growth_limit_; }
     static constexpr size_type bucket_width() noexcept { return k_bucket_width; }
 
     float load_factor() const noexcept {
@@ -596,9 +597,8 @@ public:
     void clear() noexcept {
         if (bucket_count_ == 0) size_ = 0;
         if (size_ == 0) return;
-
         destroy_all();
-
+        size_ = 0;
 #ifdef DEBUG
         total_bucket_fill_ = 0;
         bucket_fill_ops_ = 0;
@@ -712,14 +712,22 @@ public:
         return const_iterator(this, bucket_index, slot_index);
     }
 
-    iterator find_exist(const key_type &key) noexcept {
-        auto [bucket_index, slot_index] = index_of_exist(key);
-        return iterator(this, bucket_index, slot_index);
+    iterator find_exist(const key_type &key) {
+        try {
+            auto [bucket_index, slot_index] = index_of_exist(key);
+            return iterator(this, bucket_index, slot_index);
+        } catch (const std::out_of_range &) {
+            throw std::out_of_range("bucket_map_u32::find_exist: key does not exist");
+        }
     }
 
-    const_iterator find_exist(const key_type &key) const noexcept {
-        auto [bucket_index, slot_index] = index_of_exist(key);
-        return const_iterator(this, bucket_index, slot_index);
+    const_iterator find_exist(const key_type &key) const {
+        try {
+            auto [bucket_index, slot_index] = index_of_exist(key);
+            return const_iterator(this, bucket_index, slot_index);
+        } catch (const std::out_of_range &) {
+            throw std::out_of_range("bucket_map_u32::find_exist: key does not exist");
+        }
     }
 
     bool contains(const key_type &key) const noexcept {
@@ -729,13 +737,13 @@ public:
 
     mapped_type &at(const key_type &key) {
         auto [bucket_index, slot_index] = index_of(key);
-        if (bucket_index == bucket_count_) throw std::out_of_range("帮我写喵");
+        if (bucket_index == bucket_count_) throw std::out_of_range("bucket_map_u32::at: key does not exist");
         return mapped_values_[mapped_index(bucket_index, slot_index)];
     }
 
     const mapped_type &at(const key_type &key) const {
         auto [bucket_index, slot_index] = index_of(key);
-        if (bucket_index == bucket_count_) throw std::out_of_range("帮我写喵");
+        if (bucket_index == bucket_count_) throw std::out_of_range("bucket_map_u32::at: key does not exist");
         return mapped_values_[mapped_index(bucket_index, slot_index)];
     }
 
@@ -746,7 +754,7 @@ public:
             double_storage();
         }
 #ifdef DEBUG
-        if (bucket_count_ == 0) throw std::out_of_range("bucket_map_u32::operator[] bucket_count_ is zero");
+        if (bucket_count_ == 0) throw std::runtime_error("bucket_map_u32::operator[]: bucket_count_ is zero");
 #endif
         size_type bucket_index = hash_of(key) & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
@@ -766,7 +774,7 @@ public:
                 return mapped_values_[midx];
             }
         }
-        throw std::runtime_error("桶炸了喵");
+        throw std::runtime_error("bucket_map_u32::operator[]: reach the end of the bucket");
     }
 
     template <InsertPolicy Policy = default_policy> auto insert(const value_type &kv) -> insert_return_type<Policy> {
@@ -792,7 +800,7 @@ public:
             }
         }
 #ifdef DEBUG
-        if (bucket_count_ == 0) throw std::out_of_range("bucket_map_u32::insert_or_assign bucket_count_ is zero");
+        if (bucket_count_ == 0) throw std::runtime_error("bucket_map_u32::insert_or_assign: bucket_count_ is zero");
 #endif
         size_type bucket_index = hash_of(key) & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
@@ -814,10 +822,11 @@ public:
                     return make_result<Policy>(bucket_index, slot_index, false);
                 }
             }
-            throw std::runtime_error("桶炸了喵");
+            throw std::runtime_error("bucket_map_u32::insert_or_assign: reach the end of the bucket");
         } else {
             size_type slot_index = bucket.size;
-            if (slot_index == k_bucket_width) throw std::runtime_error("桶炸了喵");
+            if (slot_index == k_bucket_width)
+                throw std::runtime_error("bucket_map_u32::insert_or_assign: bucket is full");
             keys[slot_index] = key;
             size_type midx = mapped_index(bucket_index, slot_index);
             std::construct_at(mapped_values_ + midx, std::forward<M>(mapped));
@@ -838,7 +847,7 @@ public:
             }
         }
 #ifdef DEBUG
-        if (bucket_count_ == 0) throw std::out_of_range("bucket_map_u32::emplace bucket_count_ is zero");
+        if (bucket_count_ == 0) throw std::runtime_error("bucket_map_u32::emplace bucket_count_ is zero");
 #endif
         size_type bucket_index = hash_of(key) & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
@@ -857,10 +866,10 @@ public:
                 }
                 if (stored_key == key) return make_result<Policy>(bucket_index, slot_index, false);
             }
-            throw std::runtime_error("桶炸了喵");
+            throw std::runtime_error("bucket_map_u32::emplace: reach the end of the bucket");
         } else { // 不查重
             size_type slot_index = bucket.size;
-            if (slot_index == k_bucket_width) throw std::runtime_error("桶炸了喵");
+            if (slot_index == k_bucket_width) throw std::runtime_error("bucket_map_u32::emplace: bucket is full");
             keys[slot_index] = key;
             size_type midx = mapped_index(bucket_index, slot_index);
             std::construct_at(mapped_values_ + midx, std::forward<M>(mapped));
@@ -881,7 +890,7 @@ public:
             }
         }
 #ifdef DEBUG
-        if (bucket_count_ == 0) throw std::out_of_range("bucket_map_u32::try_emplace bucket_count_ is zero");
+        if (bucket_count_ == 0) throw std::runtime_error("bucket_map_u32::try_emplace bucket_count_ is zero");
 #endif
         size_type bucket_index = hash_of(key) & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
@@ -899,10 +908,10 @@ public:
                 }
                 if (stored_key == key) return make_result<Policy>(bucket_index, slot_index, false);
             }
-            throw std::runtime_error("桶炸了喵");
+            throw std::runtime_error("bucket_map_u32::try_emplace: reach the end of the bucket");
         } else {
             size_type slot_index = bucket.size;
-            if (slot_index == k_bucket_width) throw std::runtime_error("桶炸了喵");
+            if (slot_index == k_bucket_width) throw std::runtime_error("bucket_map_u32::try_emplace: bucket is full");
             keys[slot_index] = key;
             size_type midx = mapped_index(bucket_index, slot_index);
             std::construct_at(mapped_values_ + midx, std::forward<Args>(args)...);
@@ -914,7 +923,7 @@ public:
 
     template <typename M>
         requires(std::constructible_from<mapped_type, M>)
-    void overwrite(const key_type &key, M &&mapped) noexcept {
+    void overwrite(const key_type &key, M &&mapped) {
         size_type bucket_index = hash_of(key) & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
         auto &keys = bucket.keys;
@@ -926,7 +935,7 @@ public:
                 return;
             }
         }
-        std::terminate();
+        throw std::out_of_range("bucket_map_u32::overwrite: key does not exist");
     }
 
     template <InsertPolicy Policy = mcl::insert_range, std::input_iterator InputIt>

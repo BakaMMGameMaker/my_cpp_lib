@@ -202,7 +202,7 @@ private:
                            std::conditional_t<Policy::check_dup, std::pair<iterator, bool>, iterator>, void>;
 
 public:
-    explicit flat_map_u32(size_type init_size = 1, const Alloc &alloc = Alloc{})
+    flat_map_u32(size_type init_size = 1, const Alloc &alloc = Alloc{})
         : hasher_(), alloc_(alloc), slot_alloc_(alloc_), mapped_alloc_(alloc_) {
         reserve(init_size);
     }
@@ -461,10 +461,17 @@ public:
 
     const_iterator find(const key_type &key) const noexcept { return const_iterator(this, index_of(key)); }
 
-    // key 不存在则 dead loop
-    iterator find_exist(const key_type &key) noexcept { return iterator(this, index_of_exist(key)); }
+    iterator find_exist(const key_type &key) {
+        try {
+            return iterator(this, index_of_exist(key));
+        } catch (const std::out_of_range &) { throw std::out_of_range("flat_map_u32::find_exist: key does not exist"); }
+    }
 
-    const_iterator find_exist(const key_type &key) const noexcept { return const_iterator(this, index_of_exist(key)); }
+    const_iterator find_exist(const key_type &key) const {
+        try {
+            return const_iterator(this, index_of_exist(key));
+        } catch (const std::out_of_range &) { throw std::out_of_range("flat_map_u32::find_exist: key does not exist"); }
+    }
 
     bool contains(const key_type &key) const noexcept { return index_of(key) != capacity_; }
 
@@ -650,14 +657,10 @@ public:
     // 覆盖已有值，若键不存在，dead loop
     template <typename M>
         requires(std::constructible_from<mapped_type, M>)
-    void overwrite(const key_type &key, M &&mapped) noexcept {
-#ifdef DEBUG
+    void overwrite(const key_type &key, M &&mapped) {
         SizeT probe_len = 0;
-#endif
-        for (size_type index = hash_of(key) & bucket_mask_;; index = (index + 1) & bucket_mask_) {
-#ifdef DEBUG
+        for (size_type index = hash_of(key) & bucket_mask_; probe_len < capacity_; index = (index + 1) & bucket_mask_) {
             ++probe_len;
-#endif
             if (slots_[index].key == key) {
 #ifdef DEBUG
                 record_probe(probe_len);
@@ -666,6 +669,7 @@ public:
                 return;
             }
         }
+        throw std::out_of_range("flat_map_u32::overwrite: key does not exist");
     }
 
     template <InsertPolicy Policy = mcl::insert_range, std::input_iterator InputIt>
@@ -786,14 +790,10 @@ private:
         }
     }
 
-    size_type index_of_exist(const key_type &key) const noexcept {
-#ifdef DEBUG
+    size_type index_of_exist(const key_type &key) const {
         SizeT probe_len = 0;
-#endif
-        for (size_type index = hash_of(key) & bucket_mask_;; index = (index + 1) & bucket_mask_) {
-#ifdef DEBUG
+        for (size_type index = hash_of(key) & bucket_mask_; probe_len < capacity_; index = (index + 1) & bucket_mask_) {
             ++probe_len;
-#endif
             key_type stored_key = slots_[index].key;
             if (stored_key == key) {
 #ifdef DEBUG
@@ -802,6 +802,7 @@ private:
                 return index;
             }
         }
+        throw std::out_of_range("flat_map_u32::index_of_exist: key does not exist");
     }
 
     void allocate_storage(size_type capacity) {
