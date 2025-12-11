@@ -50,7 +50,7 @@ private:
 #endif
 
     struct value_reference {
-        key_type &first;
+        const key_type &first;
         mapped_type &second;
         operator value_type() const noexcept { return value_type{first, second}; }
     };
@@ -62,7 +62,7 @@ private:
     };
 
     struct value_pointer {
-        key_type &first;
+        const key_type &first;
         mapped_type &second;
         value_pointer *operator->() noexcept { return this; }
         const value_pointer *operator->() const noexcept { return this; }
@@ -319,7 +319,6 @@ public:
     }
 
     ~flat_map_u32() {
-        if (capacity_ == 0) return;
         destroy_all();
         deallocate_storage();
     }
@@ -414,55 +413,27 @@ public:
     }
 
     void rehash(size_type new_capacity) {
-        if (capacity_ == 0) {
+#ifdef DEBUG
+        ++rehash_count_;
+#endif
+        if (capacity_ == 0 || size_ == 0) {
+            deallocate_storage();
             if (new_capacity == 0) return;
             if (new_capacity <= k_min_capacity) new_capacity = k_min_capacity;
             else new_capacity = detail::next_power_of_two(new_capacity);
             allocate_storage(new_capacity);
-#ifdef DEBUG
-            ++rehash_count_;
-#endif
             return;
         }
 
-        if (size_ == 0) {
-            deallocate_storage();
-            if (new_capacity == 0) {
-                slots_ = nullptr;
-                mapped_values_ = nullptr;
-                capacity_ = 0;
-                bucket_mask_ = 0;
-                growth_limit_ = 0;
-#ifdef DEBUG
-                ++rehash_count_;
-#endif
-                return;
-            }
-            if (new_capacity <= k_min_capacity) new_capacity = k_min_capacity;
-            else new_capacity = detail::next_power_of_two(new_capacity);
-            allocate_storage(new_capacity);
-#ifdef DEBUG
-            ++rehash_count_;
-#endif
-            return;
-        }
+        if (new_capacity <= capacity_) return; // 不允许缩容
 
-        if (new_capacity <= capacity_) {
-            new_capacity = capacity_;
-        } else {
-            if (new_capacity <= k_min_capacity) new_capacity = k_min_capacity;
-            else new_capacity = detail::next_power_of_two(new_capacity);
-        }
-
-        if (new_capacity == capacity_) return;
+        if (new_capacity <= k_min_capacity) new_capacity = k_min_capacity;
+        else new_capacity = detail::next_power_of_two(new_capacity);
 
         slot_type *old_slots = slots_;
         mapped_type *old_mapped_values = mapped_values_;
         size_type old_capacity = capacity_;
         allocate_storage(new_capacity);
-#ifdef DEBUG
-        ++rehash_count_;
-#endif
         move_old_elements(old_slots, old_mapped_values, old_capacity);
     }
 
@@ -524,16 +495,16 @@ public:
 #endif
             slot_type &slot = slots_[index];
             key_type stored_key = slot.key;
-            if (stored_key == k_unoccupied) {
-                slot.key = key;
-                std::construct_at(mapped_values_ + index);
-                ++size_;
+            if (stored_key == key) {
 #ifdef DEBUG
                 record_probe(probe_len);
 #endif
                 return mapped_values_[index];
             }
-            if (stored_key == key) {
+            if (stored_key == k_unoccupied) {
+                slot.key = key;
+                std::construct_at(mapped_values_ + index);
+                ++size_;
 #ifdef DEBUG
                 record_probe(probe_len);
 #endif
@@ -704,11 +675,11 @@ public:
     size_type erase(const key_type &key) noexcept {
         size_type index = index_of(key);
         if (index == capacity_) return 0;
-        erase_at_index(index);
+        erase_at(index);
         return 1;
     }
 
-    void erase_exist(const key_type &key) noexcept { erase_at_index(index_of_exist(key)); }
+    void erase_exist(const key_type &key) noexcept { erase_at(index_of_exist(key)); }
 
     // 不检查 pos 是否指向合法槽位
     iterator erase(const_iterator pos) noexcept {
@@ -718,7 +689,7 @@ public:
 
     iterator erase_exist(const_iterator pos) noexcept {
         size_type index = pos.index_;
-        erase_at_index(index);
+        erase_at(index);
         iterator it(this, index);
         it.skip_to_next_occupied();
         return it;
@@ -837,12 +808,20 @@ private:
     }
 
     void deallocate_storage() noexcept {
-        slot_alloc_traits::deallocate(slot_alloc_, slots_, capacity_);
-        mapped_alloc_traits::deallocate(mapped_alloc_, mapped_values_, capacity_);
+        if (capacity_ != 0) {
+            slot_alloc_traits::deallocate(slot_alloc_, slots_, capacity_);
+            mapped_alloc_traits::deallocate(mapped_alloc_, mapped_values_, capacity_);
+        }
+        slots_ = nullptr;
+        mapped_values_ = nullptr;
+        capacity_ = 0;
+        bucket_mask_ = 0;
+        growth_limit_ = 0;
     }
 
     void destroy_all() noexcept {
         if constexpr (is_trivially_destructible_mapped) return;
+        if (size_ == 0) return;
         for (size_type index = 0; index < capacity_; ++index) {
             if (slots_[index].key != k_unoccupied) std::destroy_at(mapped_values_ + index);
             // std::destroy_at(slots_ + index);
@@ -900,7 +879,7 @@ private:
         }
     }
 
-    void erase_at_index(size_type index) noexcept {
+    void erase_at(size_type index) noexcept {
         // 左移 cluster
         size_type cur_index = index;
         for (;;) {

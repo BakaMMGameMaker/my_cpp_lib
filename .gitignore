@@ -1,11 +1,14 @@
 # 白名单
 !*CMakeLists.txt
 !*/
-!README.md
 !.gitignore
 !*.cpp
 !*.hpp
 !*.h
+
+# Ignore other markdown except README.md
+*.md
+!README.md
 
 # Ignore build outputs
 build/
@@ -13,4 +16,3 @@ build/**
 .vscode/
 .cache/
 *.txt
-*.md
