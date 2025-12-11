@@ -37,10 +37,18 @@ struct no_check_dup {
     static constexpr bool check_dup = false;
 };
 
+// 插入迭代器范围，只需要查重
 struct insert_range {
     static constexpr bool return_value = false;
     static constexpr bool rehash = false;
     static constexpr bool check_dup = true;
+};
+
+// 扩容后插元素，只需要返回 iterator
+struct after_rehash {
+    static constexpr bool return_value = true;
+    static constexpr bool rehash = false;
+    static constexpr bool check_dup = false;
 };
 
 // 仅插入元素

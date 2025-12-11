@@ -20,7 +20,7 @@ using Key = std::uint32_t;
 enum class KeyDistribution : std::uint32_t { kRandom = 0 };
 
 constexpr std::array<UInt32, 3> kSizes = {1u << 10, 1u << 14, 1u << 18};
-constexpr std::array<float, 2> kLoadFactors = {0.7f, 0.75f};
+constexpr std::array<float, 2> kLoadFactors = {0.7f, 0.875f};
 
 template <class Map> void apply_max_load_factor(Map &map, float max_load_factor) {
     map.max_load_factor(max_load_factor);
