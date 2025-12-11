@@ -4,6 +4,7 @@
 #include "s_hash_map_policy.hpp"
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <stdexcept>
 #include <type_traits>
@@ -268,7 +269,7 @@ private:
             key_type stored_key = bucket.keys[slot_index];
             if (stored_key == key) return {bucket_index, slot_index};
         }
-        throw std::runtime_error("键不存在喵");
+        std::terminate();
     }
 
     void erase_at(size_type bucket_index, size_type slot_index) noexcept {
@@ -284,6 +285,7 @@ private:
             mapped_values_[base_index + write] = std::move(mapped_values_[base_index + read]);
             ++write;
         }
+        // 循环退出时，read 最多为 16，write 最多为 15
         keys[write] = k_unoccupied;
         if constexpr (!is_trivially_destructible_mapped) std::destroy_at(mapped_values_ + base_index + write);
         --bucket.size;
@@ -384,7 +386,7 @@ private:
         bucket_type *old_buckets = buckets_;
         mapped_type *old_mapped_values = mapped_values_;
         size_type old_bucket_count = bucket_count_;
-        allocate_storage(bucket_count_ * 2);
+        allocate_storage(bucket_count_ == 0 ? 1 : bucket_count_ * 2);
         move_old_elements(old_buckets, old_mapped_values, old_bucket_count);
     }
 
@@ -448,11 +450,12 @@ public:
                 key_type scr_key = src_bucket.keys[slot_index];
                 if (scr_key == k_unoccupied) break;
                 size_type midx = base_index + slot_index;
-                std::construct_at(mapped_values_ + midx, mapped_values_[midx]);
+                std::construct_at(mapped_values_ + midx, other.mapped_values_[midx]);
             }
         }
     }
 
+    // TODO: 改成和拷贝构造一样的逻辑，避免无意义 hash_of
     bucket_map_u32 &operator=(const bucket_map_u32 &other) {
         if (this == &other) { return *this; }
 
@@ -742,7 +745,9 @@ public:
             if (bucket_index != bucket_count_) return mapped_values_[mapped_index(bucket_index, slot_index)];
             double_storage();
         }
-
+#ifdef DEBUG
+        if (bucket_count_ == 0) throw std::out_of_range("bucket_map_u32::operator[] bucket_count_ is zero");
+#endif
         size_type bucket_index = hash_of(key) & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
         auto &keys = bucket.keys;
@@ -786,7 +791,9 @@ public:
                 double_storage();
             }
         }
-
+#ifdef DEBUG
+        if (bucket_count_ == 0) throw std::out_of_range("bucket_map_u32::insert_or_assign bucket_count_ is zero");
+#endif
         size_type bucket_index = hash_of(key) & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
         auto &keys = bucket.keys;
@@ -830,7 +837,9 @@ public:
                 double_storage();
             }
         }
-
+#ifdef DEBUG
+        if (bucket_count_ == 0) throw std::out_of_range("bucket_map_u32::emplace bucket_count_ is zero");
+#endif
         size_type bucket_index = hash_of(key) & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
         auto &keys = bucket.keys;
@@ -871,7 +880,9 @@ public:
                 double_storage();
             }
         }
-
+#ifdef DEBUG
+        if (bucket_count_ == 0) throw std::out_of_range("bucket_map_u32::try_emplace bucket_count_ is zero");
+#endif
         size_type bucket_index = hash_of(key) & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
         auto &keys = bucket.keys;
@@ -915,7 +926,7 @@ public:
                 return;
             }
         }
-        throw std::runtime_error("键不在喵");
+        std::terminate();
     }
 
     template <InsertPolicy Policy = mcl::insert_range, std::input_iterator InputIt>

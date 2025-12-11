@@ -488,6 +488,7 @@ public:
         }
 #ifdef DEBUG
         SizeT probe_len = 0;
+        if (capacity_ == 0) throw std::out_of_range("flat_map_u32::operator[] capacity_ is zero");
 #endif
         for (size_type index = hash_of(key) & bucket_mask_;; index = (index + 1) & bucket_mask_) {
 #ifdef DEBUG
@@ -536,6 +537,7 @@ public:
         }
 #ifdef DEBUG
         SizeT probe_len = 0;
+        if (capacity_ == 0) throw std::out_of_range("flat_map_u32::operator[] capacity_ is zero");
 #endif
         for (size_type index = hash_of(key) & bucket_mask_;; index = (index + 1) & bucket_mask_) {
 #ifdef DEBUG
@@ -577,6 +579,7 @@ public:
         }
 #ifdef DEBUG
         SizeT probe_len = 0;
+        if (capacity_ == 0) throw std::out_of_range("flat_map_u32::operator[] capacity_ is zero");
 #endif
         for (size_type index = hash_of(key) & bucket_mask_;; index = (index + 1) & bucket_mask_) {
 #ifdef DEBUG
@@ -616,6 +619,7 @@ public:
         }
 #ifdef DEBUG
         SizeT probe_len = 0;
+        if (capacity_ == 0) throw std::out_of_range("flat_map_u32::operator[] capacity_ is zero");
 #endif
         for (size_type index = hash_of(key) & bucket_mask_;; index = (index + 1) & bucket_mask_) {
 #ifdef DEBUG
@@ -855,7 +859,7 @@ private:
         slot_type *old_slots = slots_;
         mapped_type *old_values = mapped_values_;
         size_type old_capacity = capacity_;
-        allocate_storage(capacity_ * 2);
+        allocate_storage(capacity_ == 0 ? k_min_capacity : capacity_ * 2);
 #ifdef DEBUG
         ++double_rehash_count_;
         ++rehash_count_;
