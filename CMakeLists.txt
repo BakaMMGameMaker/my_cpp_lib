@@ -74,7 +74,7 @@ set(BENCH_TARGETS
     bench_default_vs_no_ret
     bench_fmu32_vs_std_find_exist
     bench_fmu32_vs_std_insert_random
-    bench_fmu32_vs_std_insert_unique
+    bench_insert_unique
     bench_fmu32_vs_std
     bench_vs_std
 )

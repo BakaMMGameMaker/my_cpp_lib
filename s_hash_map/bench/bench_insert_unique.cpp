@@ -1,4 +1,5 @@
 #include "s_alias.h"
+#include "s_bucket_map_u32.hpp"
 #include "s_flat_map_u32.hpp"
 #include <array>
 #include <benchmark/benchmark.h>
@@ -19,7 +20,7 @@ using Key = std::uint32_t;
 enum class KeyDistribution : std::uint32_t { kRandom = 0 };
 
 constexpr std::array<UInt32, 3> kSizes = {1u << 10, 1u << 14, 1u << 18};
-constexpr std::array<float, 2> kLoadFactors = {0.75f, 0.875f};
+constexpr std::array<float, 2> kLoadFactors = {0.7f, 0.75f};
 
 template <class Map> void apply_max_load_factor(Map &map, float max_load_factor) {
     map.max_load_factor(max_load_factor);
@@ -55,16 +56,11 @@ template <typename K> std::vector<K> make_unique_keys(UInt32 N, std::uint64_t se
 
 using std_umap_u32 = std::unordered_map<std::uint32_t, std::uint32_t, mcl::detail::FastUInt32Hash>;
 using fmu32 = mcl::flat_map_u32<std::uint32_t>;
+using bmu32 = mcl::bucket_map_u32<std::uint32_t>;
 
 // insert unique，保证无重复键：check_dup = false
 
 // reserve + 禁止 rehash
-struct unique_reserve_ret_policy {
-    static constexpr bool return_value = true;
-    static constexpr bool rehash = false;
-    static constexpr bool check_dup = false;
-};
-
 struct unique_reserve_noret_policy {
     static constexpr bool return_value = false;
     static constexpr bool rehash = false;
@@ -72,12 +68,6 @@ struct unique_reserve_noret_policy {
 };
 
 // no reserve + 允许 rehash
-struct unique_noreserve_ret_policy {
-    static constexpr bool return_value = true;
-    static constexpr bool rehash = true;
-    static constexpr bool check_dup = false;
-};
-
 struct unique_noreserve_noret_policy {
     static constexpr bool return_value = false;
     static constexpr bool rehash = true;
@@ -136,33 +126,6 @@ static void BM_InsertUnique_std_noreserve(benchmark::State &state, float max_loa
     state.SetLabel(label);
 }
 
-// --- fmu32: reserve + 停止 rehash，有返回值 ---
-
-static void BM_InsertUnique_fmu32_reserve_ret(benchmark::State &state, float max_load_factor) {
-    const UInt32 N = static_cast<UInt32>(state.range(0));
-    const auto keys = make_unique_keys<Key>(N);
-
-    const auto label = build_label(max_load_factor);
-
-    for (auto _ : state) {
-        fmu32 map;
-        apply_max_load_factor(map, max_load_factor);
-        map.reserve(N); // 一次性预留足够容量
-
-        for (UInt32 i = 0; i < N; ++i) {
-            auto res = map.template emplace<unique_reserve_ret_policy>(keys[i], static_cast<std::uint32_t>(i));
-            benchmark::DoNotOptimize(res);
-        }
-
-        benchmark::DoNotOptimize(map);
-    }
-
-    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(N));
-    state.SetLabel(label);
-}
-
-// --- fmu32: reserve + 停止 rehash，无返回值 ---
-
 static void BM_InsertUnique_fmu32_reserve_noret(benchmark::State &state, float max_load_factor) {
     const UInt32 N = static_cast<UInt32>(state.range(0));
     const auto keys = make_unique_keys<Key>(N);
@@ -185,9 +148,7 @@ static void BM_InsertUnique_fmu32_reserve_noret(benchmark::State &state, float m
     state.SetLabel(label);
 }
 
-// --- fmu32: no reserve + 允许 rehash，有返回值 ---
-
-static void BM_InsertUnique_fmu32_noreserve_ret(benchmark::State &state, float max_load_factor) {
+static void BM_InsertUnique_fmu32_noreserve_noret(benchmark::State &state, float max_load_factor) {
     const UInt32 N = static_cast<UInt32>(state.range(0));
     const auto keys = make_unique_keys<Key>(N);
 
@@ -196,11 +157,9 @@ static void BM_InsertUnique_fmu32_noreserve_ret(benchmark::State &state, float m
     for (auto _ : state) {
         fmu32 map;
         apply_max_load_factor(map, max_load_factor);
-        // 不 reserve，依赖内部 rehash 逻辑
 
         for (UInt32 i = 0; i < N; ++i) {
-            auto res = map.template emplace<unique_noreserve_ret_policy>(keys[i], static_cast<std::uint32_t>(i));
-            benchmark::DoNotOptimize(res);
+            map.template emplace<unique_noreserve_noret_policy>(keys[i], static_cast<std::uint32_t>(i));
         }
 
         benchmark::DoNotOptimize(map);
@@ -210,16 +169,40 @@ static void BM_InsertUnique_fmu32_noreserve_ret(benchmark::State &state, float m
     state.SetLabel(label);
 }
 
-// --- fmu32: no reserve + 允许 rehash，无返回值 ---
+// --- bmu32: reserve + 停止 rehash，无返回值 ---
 
-static void BM_InsertUnique_fmu32_noreserve_noret(benchmark::State &state, float max_load_factor) {
+static void BM_InsertUnique_bmu32_reserve_noret(benchmark::State &state, float max_load_factor) {
     const UInt32 N = static_cast<UInt32>(state.range(0));
     const auto keys = make_unique_keys<Key>(N);
 
     const auto label = build_label(max_load_factor);
 
     for (auto _ : state) {
-        fmu32 map;
+        bmu32 map;
+        apply_max_load_factor(map, max_load_factor);
+        map.reserve(N);
+
+        for (UInt32 i = 0; i < N; ++i) {
+            map.template emplace<unique_reserve_noret_policy>(keys[i], static_cast<std::uint32_t>(i));
+        }
+
+        benchmark::DoNotOptimize(map);
+    }
+
+    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(N));
+    state.SetLabel(label);
+}
+
+// --- bmu32: no reserve + 允许 rehash，无返回值 ---
+
+static void BM_InsertUnique_bmu32_noreserve_noret(benchmark::State &state, float max_load_factor) {
+    const UInt32 N = static_cast<UInt32>(state.range(0));
+    const auto keys = make_unique_keys<Key>(N);
+
+    const auto label = build_label(max_load_factor);
+
+    for (auto _ : state) {
+        bmu32 map;
         apply_max_load_factor(map, max_load_factor);
 
         for (UInt32 i = 0; i < N; ++i) {
@@ -248,22 +231,23 @@ void register_all_benchmarks() {
             ("std_umap_u32_insert_unique_noreserve_" + suffix).c_str(),
             [load_factor](benchmark::State &st) { BM_InsertUnique_std_noreserve(st, load_factor); });
 
-        // fmu32
-        auto *fm_reserve_ret = benchmark::RegisterBenchmark(
-            ("fmu32_ret_insert_unique_reserve_" + suffix).c_str(),
-            [load_factor](benchmark::State &st) { BM_InsertUnique_fmu32_reserve_ret(st, load_factor); });
-
+        // fmu32 (no return value)
         auto *fm_reserve_noret = benchmark::RegisterBenchmark(
             ("fmu32_noret_insert_unique_reserve_" + suffix).c_str(),
             [load_factor](benchmark::State &st) { BM_InsertUnique_fmu32_reserve_noret(st, load_factor); });
 
-        auto *fm_noreserve_ret = benchmark::RegisterBenchmark(
-            ("fmu32_ret_insert_unique_noreserve_" + suffix).c_str(),
-            [load_factor](benchmark::State &st) { BM_InsertUnique_fmu32_noreserve_ret(st, load_factor); });
-
         auto *fm_noreserve_noret = benchmark::RegisterBenchmark(
             ("fmu32_noret_insert_unique_noreserve_" + suffix).c_str(),
             [load_factor](benchmark::State &st) { BM_InsertUnique_fmu32_noreserve_noret(st, load_factor); });
+
+        // bmu32 (no return value)
+        auto *bm_reserve_noret = benchmark::RegisterBenchmark(
+            ("bmu32_noret_insert_unique_reserve_" + suffix).c_str(),
+            [load_factor](benchmark::State &st) { BM_InsertUnique_bmu32_reserve_noret(st, load_factor); });
+
+        auto *bm_noreserve_noret = benchmark::RegisterBenchmark(
+            ("bmu32_noret_insert_unique_noreserve_" + suffix).c_str(),
+            [load_factor](benchmark::State &st) { BM_InsertUnique_bmu32_noreserve_noret(st, load_factor); });
 
         for (auto size : kSizes) {
             const auto arg = static_cast<std::int64_t>(size);
@@ -271,10 +255,11 @@ void register_all_benchmarks() {
             std_reserve->Arg(arg);
             std_noreserve->Arg(arg);
 
-            fm_reserve_ret->Arg(arg);
             fm_reserve_noret->Arg(arg);
-            fm_noreserve_ret->Arg(arg);
             fm_noreserve_noret->Arg(arg);
+
+            bm_reserve_noret->Arg(arg);
+            bm_noreserve_noret->Arg(arg);
         }
     }
 }

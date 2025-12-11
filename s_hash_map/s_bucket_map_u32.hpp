@@ -248,8 +248,10 @@ private:
     }
 
     // 不存在 return bucket count, 0
-    std::pair<size_type, size_type> index_of(const key_type &key) const noexcept {
-        size_type bucket_index = hash_of(key) & bucket_mask_;
+    std::pair<size_type, size_type> index_of(const key_type &key) const noexcept { return index_of(key, hash_of(key)); }
+
+    std::pair<size_type, size_type> index_of(const key_type &key, size_type hash) const noexcept {
+        size_type bucket_index = hash & bucket_mask_;
         const bucket_type &bucket = buckets_[bucket_index];
 
         for (size_type slot_index = 0; slot_index < k_bucket_width; ++slot_index) {
@@ -261,7 +263,11 @@ private:
     }
 
     std::pair<size_type, size_type> index_of_exist(const key_type &key) const noexcept {
-        size_type bucket_index = hash_of(key) & bucket_mask_;
+        return index_of_exist(key, hash_of(key));
+    }
+
+    std::pair<size_type, size_type> index_of_exist(const key_type &key, size_type hash) const noexcept {
+        size_type bucket_index = hash & bucket_mask_;
         const bucket_type &bucket = buckets_[bucket_index];
 
         for (size_type slot_index = 0; slot_index < k_bucket_width; ++slot_index) {
@@ -740,15 +746,16 @@ public:
     }
 
     mapped_type &operator[](const key_type &key) {
+        size_type hash = hash_of(key);
         if (size_ >= growth_limit_) { // 临界元素
-            auto [bucket_index, slot_index] = index_of(key);
+            auto [bucket_index, slot_index] = index_of(key, hash);
             if (bucket_index != bucket_count_) return mapped_values_[mapped_index(bucket_index, slot_index)];
             double_storage();
         }
 #ifdef DEBUG
         if (bucket_count_ == 0) throw std::runtime_error("bucket_map_u32::operator[]: bucket_count_ is zero");
 #endif
-        size_type bucket_index = hash_of(key) & bucket_mask_;
+        size_type bucket_index = hash & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
         auto &keys = bucket.keys;
         for (size_type slot_index = 0; slot_index < k_bucket_width; ++slot_index) {
@@ -766,23 +773,41 @@ public:
                 return mapped_values_[midx];
             }
         }
+        // key not in bucket vvv
+        rehash(bucket_count_ * 2);
         throw std::runtime_error("bucket_map_u32::operator[]: reach the end of the bucket");
     }
 
     template <InsertPolicy Policy = default_policy> auto insert(const value_type &kv) -> insert_return_type<Policy> {
-        return emplace<Policy>(kv.first, kv.second);
+        return emplace<Policy>(kv.first, hash_of(kv.first), kv.second);
+    }
+
+    template <InsertPolicy Policy = default_policy>
+    auto insert(const value_type &kv, size_type hash) -> insert_return_type<Policy> {
+        return emplace<Policy>(kv.first, hash, kv.second);
     }
 
     template <InsertPolicy Policy = default_policy> auto insert(value_type &&kv) -> insert_return_type<Policy> {
-        return emplace<Policy>(kv.first, std::move(kv.second));
+        return emplace<Policy>(kv.first, hash_of(kv.first), std::move(kv.second));
+    }
+
+    template <InsertPolicy Policy = default_policy>
+    auto insert(value_type &&kv, size_type hash) -> insert_return_type<Policy> {
+        return emplace<Policy>(kv.first, hash, std::move(kv.second));
     }
 
     template <InsertPolicy Policy = default_policy, typename M>
         requires(std::constructible_from<mapped_type, M>)
     auto insert_or_assign(const key_type &key, M &&mapped) -> insert_return_type<Policy> {
+        return insert_or_assign<Policy>(key, hash_of(key), std::forward<M>(mapped));
+    }
+
+    template <InsertPolicy Policy = default_policy, typename M>
+        requires(std::constructible_from<mapped_type, M>)
+    auto insert_or_assign(const key_type &key, size_type hash, M &&mapped) -> insert_return_type<Policy> {
         if constexpr (Policy::rehash) {
             if (size_ >= growth_limit_) {
-                auto [bucket_index, slot_index] = index_of(key);
+                auto [bucket_index, slot_index] = index_of(key, hash);
                 if (bucket_index != bucket_count_) {
                     size_type midx = mapped_index(bucket_index, slot_index);
                     mapped_values_[midx] = std::forward<M>(mapped);
@@ -794,7 +819,7 @@ public:
 #ifdef DEBUG
         if (bucket_count_ == 0) throw std::runtime_error("bucket_map_u32::insert_or_assign: bucket_count_ is zero");
 #endif
-        size_type bucket_index = hash_of(key) & bucket_mask_;
+        size_type bucket_index = hash & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
         auto &keys = bucket.keys;
         if constexpr (Policy::check_dup) {
@@ -831,9 +856,15 @@ public:
     template <InsertPolicy Policy = default_policy, typename M>
         requires(std::constructible_from<mapped_type, M>)
     auto emplace(const key_type &key, M &&mapped) -> insert_return_type<Policy> {
+        return emplace<Policy>(key, hash_of(key), std::forward<M>(mapped));
+    }
+
+    template <InsertPolicy Policy = default_policy, typename M>
+        requires(std::constructible_from<mapped_type, M>)
+    auto emplace(const key_type &key, size_type hash, M &&mapped) -> insert_return_type<Policy> {
         if constexpr (Policy::rehash) {
             if (size_ >= growth_limit_) {
-                auto [bucket_index, slot_index] = index_of(key);
+                auto [bucket_index, slot_index] = index_of(key, hash);
                 if (bucket_index != bucket_count_) return make_result<Policy>(bucket_index, slot_index, false);
                 double_storage();
             }
@@ -841,7 +872,7 @@ public:
 #ifdef DEBUG
         if (bucket_count_ == 0) throw std::runtime_error("bucket_map_u32::emplace bucket_count_ is zero");
 #endif
-        size_type bucket_index = hash_of(key) & bucket_mask_;
+        size_type bucket_index = hash & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
         auto &keys = bucket.keys;
         // 查重
@@ -874,9 +905,16 @@ public:
     template <InsertPolicy Policy = default_policy, typename... Args>
         requires(std::constructible_from<mapped_type, Args...>)
     auto try_emplace(const key_type &key, Args &&...args) -> insert_return_type<Policy> {
+        return try_emplace_with_hash<Policy>(key, hash_of(key), std::forward<Args>(args)...);
+    }
+
+    // 嘻嘻，不改名的话可能会有匹配优先级的问题喵，导致 args = {}
+    template <InsertPolicy Policy = default_policy, typename... Args>
+        requires(std::constructible_from<mapped_type, Args...>)
+    auto try_emplace_with_hash(const key_type &key, size_type hash, Args &&...args) -> insert_return_type<Policy> {
         if constexpr (Policy::rehash) {
             if (size_ >= growth_limit_) {
-                auto [bucket_index, slot_index] = index_of(key);
+                auto [bucket_index, slot_index] = index_of(key, hash);
                 if (bucket_index != bucket_count_) return make_result<Policy>(bucket_index, slot_index, false);
                 double_storage();
             }
@@ -884,7 +922,7 @@ public:
 #ifdef DEBUG
         if (bucket_count_ == 0) throw std::runtime_error("bucket_map_u32::try_emplace bucket_count_ is zero");
 #endif
-        size_type bucket_index = hash_of(key) & bucket_mask_;
+        size_type bucket_index = hash & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
         auto &keys = bucket.keys;
         if constexpr (Policy::check_dup) {
@@ -917,7 +955,13 @@ public:
     template <typename M>
         requires(std::constructible_from<mapped_type, M>)
     bool overwrite(const key_type &key, M &&mapped) noexcept {
-        size_type bucket_index = hash_of(key) & bucket_mask_;
+        return overwrite(key, hash_of(key), std::forward<M>(mapped));
+    }
+
+    template <typename M>
+        requires(std::constructible_from<mapped_type, M>)
+    bool overwrite(const key_type &key, size_type hash, M &&mapped) noexcept {
+        size_type bucket_index = hash & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
         auto &keys = bucket.keys;
         for (size_type slot_index = 0; slot_index < k_bucket_width; ++slot_index) {
@@ -941,16 +985,20 @@ public:
         insert<Policy>(init.begin(), init.end());
     }
 
-    size_type erase(const key_type &key) noexcept {
-        auto [bucket_index, slot_index] = index_of(key);
+    size_type erase(const key_type &key) noexcept { return erase(key, hash_of(key)); }
+
+    size_type erase(const key_type &key, size_type hash) noexcept {
+        auto [bucket_index, slot_index] = index_of(key, hash);
         if (bucket_index == bucket_count_) return 0;
         erase_at(bucket_index, slot_index);
         return 1;
     }
 
     // 返回 key 是否存在
-    bool erase_exist(const key_type &key) {
-        auto [bucket_index, slot_index] = index_of_exist(key);
+    bool erase_exist(const key_type &key) { return erase_exist(key, hash_of(key)); }
+
+    bool erase_exist(const key_type &key, size_type hash) {
+        auto [bucket_index, slot_index] = index_of_exist(key, hash);
         if (bucket_index == bucket_count_) return false;
         erase_at(bucket_index, slot_index);
         return true;
