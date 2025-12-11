@@ -461,17 +461,9 @@ public:
 
     const_iterator find(const key_type &key) const noexcept { return const_iterator(this, index_of(key)); }
 
-    iterator find_exist(const key_type &key) {
-        try {
-            return iterator(this, index_of_exist(key));
-        } catch (const std::out_of_range &) { throw std::out_of_range("flat_map_u32::find_exist: key does not exist"); }
-    }
+    iterator find_exist(const key_type &key) noexcept { return iterator(this, index_of_exist(key)); }
 
-    const_iterator find_exist(const key_type &key) const {
-        try {
-            return const_iterator(this, index_of_exist(key));
-        } catch (const std::out_of_range &) { throw std::out_of_range("flat_map_u32::find_exist: key does not exist"); }
-    }
+    const_iterator find_exist(const key_type &key) const noexcept { return const_iterator(this, index_of_exist(key)); }
 
     bool contains(const key_type &key) const noexcept { return index_of(key) != capacity_; }
 
@@ -654,10 +646,10 @@ public:
         }
     }
 
-    // 覆盖已有值，若键不存在，dead loop
+    // 返回 key 是否存在
     template <typename M>
         requires(std::constructible_from<mapped_type, M>)
-    void overwrite(const key_type &key, M &&mapped) {
+    bool overwrite(const key_type &key, M &&mapped) noexcept {
         SizeT probe_len = 0;
         for (size_type index = hash_of(key) & bucket_mask_; probe_len < capacity_; index = (index + 1) & bucket_mask_) {
             ++probe_len;
@@ -666,10 +658,10 @@ public:
                 record_probe(probe_len);
 #endif
                 mapped_values_[index] = std::forward<M>(mapped);
-                return;
+                return true;
             }
         }
-        throw std::out_of_range("flat_map_u32::overwrite: key does not exist");
+        return false;
     }
 
     template <InsertPolicy Policy = mcl::insert_range, std::input_iterator InputIt>
@@ -689,7 +681,13 @@ public:
         return 1;
     }
 
-    void erase_exist(const key_type &key) noexcept { erase_at(index_of_exist(key)); }
+    // 返回 key 是否存在
+    bool erase_exist(const key_type &key) noexcept {
+        size_type index = index_of_exist(key);
+        if (index == capacity_) return false;
+        erase_at(index);
+        return true;
+    }
 
     // 不检查 pos 是否指向合法槽位
     iterator erase(const_iterator pos) noexcept {
@@ -790,7 +788,7 @@ private:
         }
     }
 
-    size_type index_of_exist(const key_type &key) const {
+    size_type index_of_exist(const key_type &key) const noexcept {
         SizeT probe_len = 0;
         for (size_type index = hash_of(key) & bucket_mask_; probe_len < capacity_; index = (index + 1) & bucket_mask_) {
             ++probe_len;
@@ -802,7 +800,7 @@ private:
                 return index;
             }
         }
-        throw std::out_of_range("flat_map_u32::index_of_exist: key does not exist");
+        return capacity_;
     }
 
     void allocate_storage(size_type capacity) {

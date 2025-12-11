@@ -276,15 +276,11 @@ static void test_iterators() {
 static void test_exist() {
     map_t m{{2, 3}, {4, 5}, {6, 7}, {2, 5}, {3, 8}};
     assert(m.find_exist(2)->second == 3);
-    m.overwrite(2, 4u);
+    assert(m.overwrite(2, 4u));
     assert(m.find_exist(2)->second == 4);
-    try {
-        m.find_exist(10);
-    } catch (const std::out_of_range &e) { std::cout << e.what() << std::endl; }
+    assert(m.find_exist(10) == m.end());
     assert(m.at(4) == 5);
-    try {
-        m.overwrite(10, 20u);
-    } catch (const std::out_of_range &e) { std::cout << e.what() << std::endl; }
+    assert(!m.overwrite(10, 20u));
     try {
         m.at(10);
     } catch (const std::out_of_range &e) { std::cout << e.what() << std::endl; }

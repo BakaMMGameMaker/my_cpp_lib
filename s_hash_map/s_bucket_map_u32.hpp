@@ -260,7 +260,7 @@ private:
         return {bucket_count_, 0}; // 不在当前 bucket 视作不存在（嘻嘻）
     }
 
-    std::pair<size_type, size_type> index_of_exist(const key_type &key) const {
+    std::pair<size_type, size_type> index_of_exist(const key_type &key) const noexcept {
         size_type bucket_index = hash_of(key) & bucket_mask_;
         const bucket_type &bucket = buckets_[bucket_index];
 
@@ -268,7 +268,7 @@ private:
             key_type stored_key = bucket.keys[slot_index];
             if (stored_key == key) return {bucket_index, slot_index};
         }
-        throw std::out_of_range("bucket_map_u32::index_of_exist: key does not exist");
+        return {bucket_count_, 0};
     }
 
     void erase_at(size_type bucket_index, size_type slot_index) noexcept {
@@ -712,22 +712,14 @@ public:
         return const_iterator(this, bucket_index, slot_index);
     }
 
-    iterator find_exist(const key_type &key) {
-        try {
-            auto [bucket_index, slot_index] = index_of_exist(key);
-            return iterator(this, bucket_index, slot_index);
-        } catch (const std::out_of_range &) {
-            throw std::out_of_range("bucket_map_u32::find_exist: key does not exist");
-        }
+    iterator find_exist(const key_type &key) noexcept {
+        auto [bucket_index, slot_index] = index_of_exist(key);
+        return iterator(this, bucket_index, slot_index);
     }
 
-    const_iterator find_exist(const key_type &key) const {
-        try {
-            auto [bucket_index, slot_index] = index_of_exist(key);
-            return const_iterator(this, bucket_index, slot_index);
-        } catch (const std::out_of_range &) {
-            throw std::out_of_range("bucket_map_u32::find_exist: key does not exist");
-        }
+    const_iterator find_exist(const key_type &key) const noexcept {
+        auto [bucket_index, slot_index] = index_of_exist(key);
+        return const_iterator(this, bucket_index, slot_index);
     }
 
     bool contains(const key_type &key) const noexcept {
@@ -921,9 +913,10 @@ public:
         }
     }
 
+    // 覆写，返回 key 是否存在
     template <typename M>
         requires(std::constructible_from<mapped_type, M>)
-    void overwrite(const key_type &key, M &&mapped) {
+    bool overwrite(const key_type &key, M &&mapped) noexcept {
         size_type bucket_index = hash_of(key) & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
         auto &keys = bucket.keys;
@@ -932,10 +925,10 @@ public:
             if (stored_key == key) {
                 size_type midx = mapped_index(bucket_index, slot_index);
                 mapped_values_[midx] = std::forward<M>(mapped);
-                return;
+                return true;
             }
         }
-        throw std::out_of_range("bucket_map_u32::overwrite: key does not exist");
+        return false;
     }
 
     template <InsertPolicy Policy = mcl::insert_range, std::input_iterator InputIt>
@@ -955,9 +948,12 @@ public:
         return 1;
     }
 
-    void erase_exist(const key_type &key) {
+    // 返回 key 是否存在
+    bool erase_exist(const key_type &key) {
         auto [bucket_index, slot_index] = index_of_exist(key);
+        if (bucket_index == bucket_count_) return false;
         erase_at(bucket_index, slot_index);
+        return true;
     }
 
     iterator erase(const_iterator pos) {
