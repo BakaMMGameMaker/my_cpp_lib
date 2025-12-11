@@ -230,9 +230,13 @@ public:
         if (this == &other) return *this;
         clear();
         if constexpr (std::allocator_traits<Alloc>::propagate_on_container_copy_assignment::value) {
-            alloc_ = other.alloc_;
-            slot_alloc_ = other.slot_alloc_;
-            mapped_alloc_ = other.mapped_alloc_;
+            if (alloc_ != other.alloc_) {
+                destroy_all();
+                deallocate_storage();
+                alloc_ = other.alloc_;
+                slot_alloc_ = other.slot_alloc_;
+                mapped_alloc_ = other.mapped_alloc_;
+            }
         }
         hasher_ = other.hasher_;
         if (other.size_ == 0) return *this;
@@ -277,15 +281,16 @@ public:
                           slot_alloc_traits::propagate_on_container_move_assignment::value,
                       "flat_map_u32 requires allocator that is always_equal or propagates on move assignment");
         if (this == &other) return *this;
-        if (capacity_ > 0) {
-            destroy_all();
-            deallocate_storage();
-        }
+
+        destroy_all();
+        deallocate_storage();
+
         if constexpr (slot_alloc_traits::propagate_on_container_move_assignment::value) {
             alloc_ = std::move(other.alloc_);
             slot_alloc_ = std::move(other.slot_alloc_);
             mapped_alloc_ = std::move(other.mapped_alloc_);
         }
+
         hasher_ = std::move(other.hasher_);
         slots_ = other.slots_;
         mapped_values_ = other.mapped_values_;
@@ -364,18 +369,13 @@ public:
         if (size_ == 0) {
             if (capacity_ == 0) return;
             deallocate_storage();
-            slots_ = nullptr;
-            mapped_values_ = nullptr;
-            capacity_ = 0;
-            bucket_mask_ = 0;
-            growth_limit_ = 0;
             return;
         }
         size_type new_capacity = static_cast<size_type>(std::ceil(static_cast<float>(size_) / max_load_factor_));
         if (new_capacity <= k_min_capacity) new_capacity = k_min_capacity;
         else new_capacity = detail::next_power_of_two(new_capacity);
 
-        if (new_capacity == capacity_) return;
+        if (new_capacity >= capacity_) return;
 
         slot_type *old_slots = slots_;
         mapped_type *old_mapped_values = mapped_values_;
@@ -664,13 +664,15 @@ public:
         }
     }
 
-    template <std::input_iterator InputIt>
+    template <InsertPolicy Policy = mcl::insert_range, std::input_iterator InputIt>
         requires std::convertible_to<std::iter_reference_t<InputIt>, value_type>
     void insert(InputIt first, InputIt last) {
-        for (; first != last; ++first) insert(*first);
+        for (; first != last; ++first) insert<Policy>(*first);
     }
 
-    void insert(std::initializer_list<value_type> init) { insert(init.begin(), init.end()); }
+    template <InsertPolicy Policy = mcl::insert_range> void insert(std::initializer_list<value_type> init) {
+        insert<Policy>(init.begin(), init.end());
+    }
 
     size_type erase(const key_type &key) noexcept {
         size_type index = index_of(key);

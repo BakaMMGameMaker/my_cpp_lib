@@ -27,6 +27,7 @@ private:
     static constexpr size_type k_bucket_width = 16;
     static constexpr size_type k_bucket_width_mask = k_bucket_width - 1;
     static constexpr size_type k_min_capacity = k_bucket_width;
+    static constexpr bool is_trivially_copyable_mapped = std::is_trivially_copyable_v<mapped_type>;
     static constexpr bool is_trivially_destructible_mapped = std::is_trivially_destructible_v<mapped_type>;
 
     struct Bucket {
@@ -240,8 +241,6 @@ private:
     mutable SizeT double_rehash_count_ = 0;
 #endif
 
-    [[noreturn]] static void todo_(const char *func) { throw std::logic_error(func); }
-
     size_type hash_of(const key_type &key) const noexcept { return hasher_(key); }
 
     size_type mapped_index(size_type bucket_index, size_type slot_index) const noexcept {
@@ -326,12 +325,16 @@ private:
         growth_limit_ = 0;
     }
 
+    // 销毁所有活跃元素，置所有槽位为 unoccupied
     void destroy_all() noexcept {
-        if constexpr (is_trivially_destructible_mapped) return;
         for (size_type bucket_index = 0; bucket_index < bucket_count_; ++bucket_index) {
-            auto &keys = buckets_[bucket_index].keys;
+            bucket_type &bucket = buckets_[bucket_index];
+            auto &keys = bucket.keys;
+            bucket.size = 0;
             for (size_type slot_index = 0; slot_index < k_bucket_width; ++slot_index) {
                 if (keys[slot_index] == k_unoccupied) break;
+                keys[slot_index] = k_unoccupied;
+                if constexpr (is_trivially_destructible_mapped) continue;
                 size_type index = mapped_index(bucket_index, slot_index);
                 std::destroy_at(mapped_values_ + index);
             }
@@ -411,25 +414,73 @@ public:
 
     bucket_map_u32(std::initializer_list<value_type> init, const Alloc &alloc = Alloc{})
         : hasher_(), alloc_(alloc), bucket_alloc_(alloc_), mapped_alloc_(alloc_) {
-        (void)init;
-        // TODO: reserve(init.size()); 然后逐个插入
-        todo_("bucket_map_u32::bucket_map_u32(initializer_list)");
+        reserve(static_cast<size_type>(init.size()));
+        insert<mcl::insert_range>(init.begin(), init.end());
     }
 
     bucket_map_u32(const bucket_map_u32 &other)
         : hasher_(other.hasher_),
           alloc_(std::allocator_traits<Alloc>::select_on_container_copy_construction(other.alloc_)),
-          bucket_alloc_(alloc_), mapped_alloc_(alloc_) {
-        (void)other;
-        // TODO: 深拷贝 buckets_ & mapped_values_
-        todo_("bucket_map_u32::bucket_map_u32(const bucket_map_u32&)");
+          bucket_alloc_(alloc_), mapped_alloc_(alloc_), buckets_(nullptr), mapped_values_(nullptr), bucket_count_(0),
+          capacity_(0), bucket_mask_(0), size_(0), growth_limit_(0), max_load_factor_(other.max_load_factor_)
+#ifdef DEBUG
+          ,
+          total_bucket_fill_(0), bucket_fill_ops_(0), max_bucket_size_(0), rehash_count_(0), double_rehash_count_(0)
+#endif
+    {
+        if (other.bucket_count_ == 0) return;
+
+        allocate_storage(other.bucket_count_);
+        size_ = other.size_;
+
+        // 照搬 buckets
+        std::memcpy(buckets_, other.buckets_, static_cast<SizeT>(bucket_count_) * sizeof(bucket_type));
+
+        if constexpr (is_trivially_copyable_mapped) {
+            std::memcpy(mapped_values_, other.mapped_values_, static_cast<SizeT>(capacity_) * sizeof(mapped_type));
+            return;
+        }
+        // !is trivially copyable vvv
+        for (size_type bucket_index = 0; bucket_index < bucket_count_; ++bucket_index) {
+            const bucket_type &src_bucket = other.buckets_[bucket_index];
+            const size_type base_index = bucket_index << 4;
+            for (size_type slot_index = 0; slot_index < k_bucket_width; ++slot_index) {
+                key_type scr_key = src_bucket.keys[slot_index];
+                if (scr_key == k_unoccupied) break;
+                size_type midx = base_index + slot_index;
+                std::construct_at(mapped_values_ + midx, mapped_values_[midx]);
+            }
+        }
     }
 
     bucket_map_u32 &operator=(const bucket_map_u32 &other) {
-        if (this == &other) return *this;
-        (void)other;
-        // TODO: 清理自身再拷贝
-        todo_("bucket_map_u32::operator=(const bucket_map_u32&)");
+        if (this == &other) { return *this; }
+
+        if constexpr (std::allocator_traits<Alloc>::propagate_on_container_copy_assignment::value) {
+            if (alloc_ != other.alloc_) {
+                destroy_all();
+                deallocate_storage();
+                alloc_ = other.alloc_;
+                bucket_alloc_ = bucket_allocator_type(alloc_);
+                mapped_alloc_ = mapped_allocator_type(alloc_);
+            }
+        }
+
+        hasher_ = other.hasher_;
+        max_load_factor_ = other.max_load_factor_;
+
+#ifdef DEBUG
+        total_bucket_fill_ = 0;
+        bucket_fill_ops_ = 0;
+        max_bucket_size_ = 0;
+        rehash_count_ = 0;
+        double_rehash_count_ = 0;
+#endif
+
+        clear();
+        reserve(other.size_);
+        insert<mcl::fast>(other.begin(), other.end());
+        return *this;
     }
 
     bucket_map_u32(bucket_map_u32 &&other) noexcept
@@ -466,16 +517,55 @@ public:
                           bucket_alloc_traits::propagate_on_container_move_assignment::value,
                       "bucket_map_u32 requires allocator that is always_equal or "
                       "propagates on move assignment");
-        if (this == &other) return *this;
-        (void)other;
-        // TODO: 清理自身资源，偷对方指针
-        todo_("bucket_map_u32::operator=(bucket_map_u32&&)");
+        if (this == &other) { return *this; }
+
+        destroy_all();
+        deallocate_storage();
+
+        if constexpr (bucket_alloc_traits::propagate_on_container_move_assignment::value) {
+            alloc_ = std::move(other.alloc_);
+            bucket_alloc_ = std::move(other.bucket_alloc_);
+            mapped_alloc_ = std::move(other.mapped_alloc_);
+        }
+
+        hasher_ = std::move(other.hasher_);
+        max_load_factor_ = other.max_load_factor_;
+
+        buckets_ = other.buckets_;
+        mapped_values_ = other.mapped_values_;
+        bucket_count_ = other.bucket_count_;
+        capacity_ = other.capacity_;
+        bucket_mask_ = other.bucket_mask_;
+        size_ = other.size_;
+        growth_limit_ = other.growth_limit_;
+#ifdef DEBUG
+        total_bucket_fill_ = other.total_bucket_fill_;
+        bucket_fill_ops_ = other.bucket_fill_ops_;
+        max_bucket_size_ = other.max_bucket_size_;
+        rehash_count_ = other.rehash_count_;
+        double_rehash_count_ = other.double_rehash_count_;
+#endif
+
+        other.buckets_ = nullptr;
+        other.mapped_values_ = nullptr;
+        other.bucket_count_ = 0;
+        other.capacity_ = 0;
+        other.bucket_mask_ = 0;
+        other.size_ = 0;
+        other.growth_limit_ = 0;
+#ifdef DEBUG
+        other.total_bucket_fill_ = 0;
+        other.bucket_fill_ops_ = 0;
+        other.max_bucket_size_ = 0;
+        other.rehash_count_ = 0;
+        other.double_rehash_count_ = 0;
+#endif
+        return *this;
     }
 
     ~bucket_map_u32() {
-        if (bucket_count_ == 0) return;
-        // TODO: destroy_all(); deallocate_storage();
-        todo_("bucket_map_u32::~bucket_map_u32");
+        destroy_all();
+        deallocate_storage();
     }
 
     allocator_type get_allocator() const noexcept { return alloc_; }
@@ -501,8 +591,16 @@ public:
     }
 
     void clear() noexcept {
-        // TODO: 将所有 bucket 清空，保持容量不变
-        todo_("bucket_map_u32::clear");
+        if (bucket_count_ == 0) size_ = 0;
+        if (size_ == 0) return;
+
+        destroy_all();
+
+#ifdef DEBUG
+        total_bucket_fill_ = 0;
+        bucket_fill_ops_ = 0;
+        max_bucket_size_ = 0;
+#endif
     }
 
     void reserve(size_type new_size) {
@@ -515,16 +613,47 @@ public:
     }
 
     void shrink_to_fit() {
-        // TODO: 按 size_ 重新计算合适 bucket_count_ 并收缩
-        todo_("bucket_map_u32::shrink_to_fit");
+        if (size_ == 0) deallocate_storage(); // <- bucket count = 0
+        if (bucket_count_ == 0) return;
+
+        size_type new_capacity = static_cast<size_type>(std::ceil(static_cast<float>(size_) / max_load_factor_));
+        if (new_capacity <= k_min_capacity) new_capacity = k_min_capacity;
+        else new_capacity = detail::next_power_of_two(new_capacity);
+
+        size_type new_bucket_count = new_capacity >> 4;
+
+        if (new_bucket_count >= bucket_count_) return;
+
+        bucket_type *old_buckets = buckets_;
+        mapped_type *old_mapped_values = mapped_values_;
+        size_type old_bucket_count = bucket_count_;
+
+        allocate_storage(new_bucket_count);
+        move_old_elements(old_buckets, old_mapped_values, old_bucket_count);
     }
 
     void swap(bucket_map_u32 &other) noexcept {
         if (this == &other) return;
         using std::swap;
-        // TODO: 交换所有成员
-        (void)other;
-        todo_("bucket_map_u32::swap");
+        swap(hasher_, other.hasher_);
+        swap(alloc_, other.alloc_);
+        swap(bucket_alloc_, other.bucket_alloc_);
+        swap(mapped_alloc_, other.mapped_alloc_);
+        swap(buckets_, other.buckets_);
+        swap(mapped_values_, other.mapped_values_);
+        swap(bucket_count_, other.bucket_count_);
+        swap(capacity_, other.capacity_);
+        swap(bucket_mask_, other.bucket_mask_);
+        swap(size_, other.size_);
+        swap(growth_limit_, other.growth_limit_);
+        swap(max_load_factor_, other.max_load_factor_);
+#ifdef DEBUG
+        swap(total_bucket_fill_, other.total_bucket_fill_);
+        swap(bucket_fill_ops_, other.bucket_fill_ops_);
+        swap(max_bucket_size_, other.max_bucket_size_);
+        swap(rehash_count_, other.rehash_count_);
+        swap(double_rehash_count_, other.double_rehash_count_);
+#endif
     }
 
     void rehash(size_type new_capacity) {
@@ -661,25 +790,34 @@ public:
         size_type bucket_index = hash_of(key) & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
         auto &keys = bucket.keys;
-        for (size_type slot_index = 0; slot_index < k_bucket_width; ++slot_index) {
-            key_type stored_key = keys[slot_index];
-            if (stored_key == k_unoccupied) {
-                keys[slot_index] = key;
-                size_type midx = mapped_index(bucket_index, slot_index);
-                std::construct_at(mapped_values_ + midx, std::forward<M>(mapped));
-                ++size_;
-                ++bucket.size;
-                return make_result<Policy>(bucket_index, slot_index, true);
-            }
-            if constexpr (Policy::check_dup) {
+        if constexpr (Policy::check_dup) {
+            for (size_type slot_index = 0; slot_index < k_bucket_width; ++slot_index) {
+                key_type stored_key = keys[slot_index];
+                if (stored_key == k_unoccupied) {
+                    keys[slot_index] = key;
+                    size_type midx = mapped_index(bucket_index, slot_index);
+                    std::construct_at(mapped_values_ + midx, std::forward<M>(mapped));
+                    ++size_;
+                    ++bucket.size;
+                    return make_result<Policy>(bucket_index, slot_index, true);
+                }
                 if (stored_key == key) {
                     size_type midx = mapped_index(bucket_index, slot_index);
                     mapped_values_[midx] = std::forward<M>(mapped);
                     return make_result<Policy>(bucket_index, slot_index, false);
                 }
             }
+            throw std::runtime_error("桶炸了喵");
+        } else {
+            size_type slot_index = bucket.size;
+            if (slot_index == k_bucket_width) throw std::runtime_error("桶炸了喵");
+            keys[slot_index] = key;
+            size_type midx = mapped_index(bucket_index, slot_index);
+            std::construct_at(mapped_values_ + midx, std::forward<M>(mapped));
+            ++size_;
+            ++bucket.size;
+            return make_result<Policy>(bucket_index, slot_index, true);
         }
-        throw std::runtime_error("桶炸了喵");
     }
 
     template <InsertPolicy Policy = default_policy, typename M>
@@ -696,21 +834,31 @@ public:
         size_type bucket_index = hash_of(key) & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
         auto &keys = bucket.keys;
-        for (size_type slot_index = 0; slot_index < k_bucket_width; ++slot_index) {
-            key_type stored_key = keys[slot_index];
-            if (stored_key == k_unoccupied) {
-                keys[slot_index] = key;
-                size_type midx = mapped_index(bucket_index, slot_index);
-                std::construct_at(mapped_values_ + midx, std::forward<M>(mapped));
-                ++size_;
-                ++bucket.size;
-                return make_result<Policy>(bucket_index, slot_index, true);
-            }
-            if constexpr (Policy::check_dup) {
+        // 查重
+        if constexpr (Policy::check_dup) {
+            for (size_type slot_index = 0; slot_index < k_bucket_width; ++slot_index) {
+                key_type stored_key = keys[slot_index];
+                if (stored_key == k_unoccupied) {
+                    keys[slot_index] = key;
+                    size_type midx = mapped_index(bucket_index, slot_index);
+                    std::construct_at(mapped_values_ + midx, std::forward<M>(mapped));
+                    ++size_;
+                    ++bucket.size;
+                    return make_result<Policy>(bucket_index, slot_index, true);
+                }
                 if (stored_key == key) return make_result<Policy>(bucket_index, slot_index, false);
             }
+            throw std::runtime_error("桶炸了喵");
+        } else { // 不查重
+            size_type slot_index = bucket.size;
+            if (slot_index == k_bucket_width) throw std::runtime_error("桶炸了喵");
+            keys[slot_index] = key;
+            size_type midx = mapped_index(bucket_index, slot_index);
+            std::construct_at(mapped_values_ + midx, std::forward<M>(mapped));
+            ++size_;
+            ++bucket.size;
+            return make_result<Policy>(bucket_index, slot_index, true);
         }
-        throw std::runtime_error("桶炸了喵");
     }
 
     template <InsertPolicy Policy = default_policy, typename... Args>
@@ -727,21 +875,30 @@ public:
         size_type bucket_index = hash_of(key) & bucket_mask_;
         bucket_type &bucket = buckets_[bucket_index];
         auto &keys = bucket.keys;
-        for (size_type slot_index = 0; slot_index < k_bucket_width; ++slot_index) {
-            key_type stored_key = keys[slot_index];
-            if (stored_key == k_unoccupied) {
-                keys[slot_index] = key;
-                size_type midx = mapped_index(bucket_index, slot_index);
-                std::construct_at(mapped_values_ + midx, std::forward<Args>(args)...);
-                ++size_;
-                ++bucket.size;
-                return make_result<Policy>(bucket_index, slot_index, true);
-            }
-            if constexpr (Policy::check_dup) {
+        if constexpr (Policy::check_dup) {
+            for (size_type slot_index = 0; slot_index < k_bucket_width; ++slot_index) {
+                key_type stored_key = keys[slot_index];
+                if (stored_key == k_unoccupied) {
+                    keys[slot_index] = key;
+                    size_type midx = mapped_index(bucket_index, slot_index);
+                    std::construct_at(mapped_values_ + midx, std::forward<Args>(args)...);
+                    ++size_;
+                    ++bucket.size;
+                    return make_result<Policy>(bucket_index, slot_index, true);
+                }
                 if (stored_key == key) return make_result<Policy>(bucket_index, slot_index, false);
             }
+            throw std::runtime_error("桶炸了喵");
+        } else {
+            size_type slot_index = bucket.size;
+            if (slot_index == k_bucket_width) throw std::runtime_error("桶炸了喵");
+            keys[slot_index] = key;
+            size_type midx = mapped_index(bucket_index, slot_index);
+            std::construct_at(mapped_values_ + midx, std::forward<Args>(args)...);
+            ++size_;
+            ++bucket.size;
+            return make_result<Policy>(bucket_index, slot_index, true);
         }
-        throw std::runtime_error("桶炸了喵");
     }
 
     template <typename M>
@@ -761,13 +918,15 @@ public:
         throw std::runtime_error("键不在喵");
     }
 
-    template <std::input_iterator InputIt>
+    template <InsertPolicy Policy = mcl::insert_range, std::input_iterator InputIt>
         requires std::convertible_to<std::iter_reference_t<InputIt>, value_type>
     void insert(InputIt first, InputIt last) {
-        for (; first != last; ++first) insert(*first);
+        for (; first != last; ++first) insert<Policy>(*first);
     }
 
-    void insert(std::initializer_list<value_type> init) { insert(init.begin(), init.end()); }
+    template <InsertPolicy Policy = mcl::insert_range> void insert(std::initializer_list<value_type> init) {
+        insert<Policy>(init.begin(), init.end());
+    }
 
     size_type erase(const key_type &key) noexcept {
         auto [bucket_index, slot_index] = index_of(key);

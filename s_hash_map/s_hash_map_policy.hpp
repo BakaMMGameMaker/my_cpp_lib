@@ -35,6 +35,12 @@ struct no_check_dup {
     static constexpr bool check_dup = false;
 };
 
+struct insert_range {
+    static constexpr bool return_value = false;
+    static constexpr bool rehash = false;
+    static constexpr bool check_dup = true;
+};
+
 // 仅插入元素
 struct fast {
     static constexpr bool return_value = false;
