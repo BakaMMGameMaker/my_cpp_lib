@@ -19,6 +19,7 @@ inline constexpr int k_group_width = 16; // 一组 16 个 control_t
 inline constexpr bool is_power_of_two(UInt32 x) noexcept { return x && ((x & (x - 1)) == 0); }
 
 inline constexpr UInt32 next_power_of_two(UInt32 x) noexcept {
+    if (x <= 1) return 1;
     --x;
     x |= x >> 1; // 最高位和第二高位都为 1
     x |= x >> 2; // 前四高位都为 1

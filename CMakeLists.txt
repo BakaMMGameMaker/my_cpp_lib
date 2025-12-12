@@ -72,7 +72,7 @@ set(BENCH_TARGETS
     bench_default_vs_no_check_dup
     bench_default_vs_no_rehash
     bench_default_vs_no_ret
-    bench_fmu32_vs_std_find_exist
+    bench_find_exist
     bench_fmu32_vs_std_insert_random
     bench_insert_unique
     bench_fmu32_vs_std
@@ -90,6 +90,7 @@ set(BENCH_COMMON_OPTS
     -Wno-switch-default
     -Wno-unneeded-internal-declaration
     -Wno-unused-template
+    -Wno-unused-variable
 )
 
 # benchmark 公共 link libs

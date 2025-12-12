@@ -34,9 +34,7 @@ class flat_hash_map {
 public:
     // control_t = uint8
     // k empty = 0x80
-    // k min capacity = 8
     // k default max load factor = .75
-    // 不要给 next power of two 传入 <= 1 的值
     using key_type = KeyType;
     using mapped_type = ValueType;
     using value_type = std::pair<KeyType, ValueType>;
