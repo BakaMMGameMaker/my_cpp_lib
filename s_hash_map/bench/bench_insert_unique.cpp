@@ -5,6 +5,7 @@
 #include <benchmark/benchmark.h>
 #include <cstdint>
 #include <iomanip>
+#include <iostream>
 #include <random>
 #include <sstream>
 #include <string>
@@ -19,8 +20,8 @@ using Key = std::uint32_t;
 // 只测 random 分布即可
 enum class KeyDistribution : std::uint32_t { kRandom = 0 };
 
-constexpr std::array<UInt32, 3> kSizes = {1u << 10, 1u << 14, 1u << 18};
-constexpr std::array<float, 2> kLoadFactors = {0.7f, 0.875f};
+constexpr std::array<UInt32, 2> kSizes = {1u << 10, 1u << 18};
+constexpr std::array<float, 1> kLoadFactors = {0.7f};
 
 template <class Map> void apply_max_load_factor(Map &map, float max_load_factor) {
     map.max_load_factor(max_load_factor);
@@ -87,7 +88,7 @@ static void BM_InsertUnique_std_reserve(benchmark::State &state, float max_load_
     for (auto _ : state) {
         std_umap_u32 map;
         apply_max_load_factor(map, max_load_factor);
-        map.reserve(N); // 尽量避免 rehash
+        map.reserve(N);
 
         for (UInt32 i = 0; i < N; ++i) {
             auto res = map.emplace(keys[i], static_cast<std::uint32_t>(i));

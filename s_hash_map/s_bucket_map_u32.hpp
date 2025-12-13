@@ -301,12 +301,12 @@ private:
 
     // 不存在 return bucket count, 0
     std::pair<size_type, UInt8> index_of(const key_type &key, size_type hash) const noexcept {
-        size_type bucket_index = hash & bucket_mask_;
-        const bucket_type &bucket = buckets_[bucket_index];
+        size_type bidx = hash & bucket_mask_;
+        const bucket_type &b = buckets_[bidx];
 
-        for (UInt8 slot = 0; slot < bucket.size; ++slot) {
-            key_type stored_key = bucket.entries[slot].key;
-            if (stored_key == key) return {bucket_index, slot};
+        for (UInt8 slot = 0; slot < k_bucket_width; ++slot) {
+            key_type stored_key = b.entries[slot].key;
+            if (stored_key == key) return {bidx, slot};
         }
         return {bucket_count_, 0}; // 不在当前 bucket 视作不存在
     }
@@ -362,7 +362,7 @@ private:
     void deallocate_storage() noexcept {
         if (bucket_count_ != 0) { bucket_alloc_traits::deallocate(bucket_alloc_, buckets_, bucket_count_); }
         if (val_cap_ != 0) {
-            mapped_alloc_traits::deallocate(mapped_alloc_, vals_, bucket_count_);
+            mapped_alloc_traits::deallocate(mapped_alloc_, vals_, val_cap_);
             ::operator delete(locs_);
         }
         buckets_ = nullptr;
@@ -640,7 +640,6 @@ public:
         // values 区只需要能容纳 size 个元素就行，无需预留到 bucket count
         // 我们不需要 values 中留有空位
         ensure_val_cap_for(new_size);
-
         // bucket 区仍需 max load factor 语义以便即使扩容，减少探测压力
         float need = static_cast<float>(new_size) / max_load_factor_;
         size_type min_bucket_count = static_cast<size_type>(std::ceil(need));
@@ -694,7 +693,7 @@ public:
     }
 
     void rehash(size_type new_capacity) {
-        // 注意，语义其实相当于期望 bucket count
+        // 语义为 bucket count
         size_type new_bucket_count = new_capacity;
         // 只搬 bucket 区
         if (bucket_count_ == 0 || size_ == 0) {
