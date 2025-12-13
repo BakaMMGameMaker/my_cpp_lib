@@ -1,5 +1,7 @@
 #include "s_alias.h"
+#include "s_bucket_map_u32.hpp"
 #include "s_flat_map_u32.hpp"
+#include <algorithm>
 #include <array>
 #include <benchmark/benchmark.h>
 #include <cstdint>
@@ -15,11 +17,8 @@ namespace {
 
 using Key = std::uint32_t;
 
-// 只测 random 分布即可
-// 不用专门的枚举了，直接用打乱后的唯一键
-
 constexpr std::array<UInt32, 3> kSizes = {1u << 10, 1u << 14, 1u << 18};
-constexpr std::array<float, 2> kLoadFactors = {0.75f, 0.875f};
+constexpr std::array<float, 2> kLoadFactors = {0.7f, 0.875f};
 
 template <class Map> void apply_max_load_factor(Map &map, float max_load_factor) {
     map.max_load_factor(max_load_factor);
@@ -55,13 +54,14 @@ template <typename K> std::vector<K> make_unique_keys(UInt32 N, std::uint64_t se
 
 using std_umap_u32 = std::unordered_map<std::uint32_t, std::uint32_t, mcl::detail::FastUInt32Hash>;
 using fmu32 = mcl::flat_map_u32<std::uint32_t>;
+using bmu32 = mcl::bucket_map_u32<std::uint32_t>;
 
-// 预留 + 唯一键 + 不返回值 + 不触发 rehash，用于建表         // <- 新增
-struct unique_reserve_noret_policy {            // <- 新增
-    static constexpr bool return_value = false; // <- 新增
-    static constexpr bool rehash = false;       // <- 新增
-    static constexpr bool check_dup = false;    // <- 新增
-}; // <- 新增
+// 预留 + 唯一键 + 不返回值 + 不触发 rehash，用于建表
+struct unique_reserve_noret_policy {
+    static constexpr bool return_value = false;
+    static constexpr bool rehash = false;
+    static constexpr bool check_dup = false;
+};
 
 // ----------------- Benchmark 实现：find hit -----------------
 //
@@ -132,6 +132,33 @@ static void BM_FindHit_fmu32_reserve(benchmark::State &state, float max_load_fac
     state.SetLabel(label);
 }
 
+// --- bmu32: reserve 建表 + find_exist hit ---
+
+static void BM_FindHit_bmu32_reserve(benchmark::State &state, float max_load_factor) {
+    const UInt32 N = static_cast<UInt32>(state.range(0));
+    const auto keys = make_unique_keys<Key>(N);
+
+    bmu32 map;
+    apply_max_load_factor(map, max_load_factor);
+    map.reserve(N);
+
+    for (UInt32 i = 0; i < N; ++i) {
+        map.template emplace<unique_reserve_noret_policy>(keys[i], static_cast<std::uint32_t>(i));
+    }
+
+    const auto label = build_find_label(max_load_factor);
+
+    for (auto _ : state) {
+        for (UInt32 i = 0; i < N; ++i) {
+            auto it = map.find_exist(keys[i]);
+            benchmark::DoNotOptimize(it);
+        }
+    }
+
+    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(N));
+    state.SetLabel(label);
+}
+
 // ----------------- 注册：bench_fmu32_vs_std_find_hit -----------------
 
 void register_all_benchmarks() {
@@ -149,12 +176,18 @@ void register_all_benchmarks() {
                 BM_FindHit_fmu32_reserve(st, load_factor);
             });
 
+        // bmu32
+        auto *bm_reserve =
+            benchmark::RegisterBenchmark(("bmu32_find_exist_" + suffix).c_str(), [load_factor](benchmark::State &st) {
+                BM_FindHit_bmu32_reserve(st, load_factor);
+            });
+
         for (auto size : kSizes) {
             const auto arg = static_cast<std::int64_t>(size);
 
             std_reserve->Arg(arg);
-
             fm_reserve->Arg(arg);
+            bm_reserve->Arg(arg);
         }
     }
 }

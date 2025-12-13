@@ -37,7 +37,7 @@ struct no_check_dup {
     static constexpr bool check_dup = false;
 };
 
-// 插入迭代器范围，只需要查重
+// 插入迭代器范围，仅查重
 struct insert_range {
     static constexpr bool return_value = false;
     static constexpr bool rehash = false;

@@ -434,6 +434,8 @@ public:
         mapped_type *old_mapped_values = mapped_values_;
         size_type old_capacity = capacity_;
         allocate_storage(new_capacity);
+
+        // TODO：可以学习 bucket map，搬迁 mapped 和搬迁 keys 分离
         move_old_elements(old_slots, old_mapped_values, old_capacity);
     }
 

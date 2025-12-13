@@ -57,7 +57,6 @@ template <typename K> std::vector<K> make_unique_keys(UInt32 N, std::uint64_t se
 using std_umap_u32 = std::unordered_map<std::uint32_t, std::uint32_t, mcl::detail::FastUInt32Hash>;
 using fmu32 = mcl::flat_map_u32<std::uint32_t>;
 using bmu32 = mcl::bucket_map_u32<std::uint32_t>;
-using bm15u32 = mcl::bucket_map_u32_15keys<std::uint32_t>;
 
 // insert unique，保证无重复键：check_dup = false
 
@@ -217,53 +216,6 @@ static void BM_InsertUnique_bmu32_noreserve_noret(benchmark::State &state, float
     state.SetLabel(label);
 }
 
-// --- bm15u32: reserve + 停止 rehash，无返回值 ---
-
-static void BM_InsertUnique_bm15u32_reserve_noret(benchmark::State &state, float max_load_factor) {
-    const UInt32 N = static_cast<UInt32>(state.range(0));
-    const auto keys = make_unique_keys<Key>(N);
-
-    const auto label = build_label(max_load_factor);
-
-    for (auto _ : state) {
-        bm15u32 map;
-        apply_max_load_factor(map, max_load_factor);
-        map.reserve(N);
-
-        for (UInt32 i = 0; i < N; ++i) {
-            map.template emplace<unique_reserve_noret_policy>(keys[i], static_cast<std::uint32_t>(i));
-        }
-
-        benchmark::DoNotOptimize(map);
-    }
-
-    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(N));
-    state.SetLabel(label);
-}
-
-// --- bm15u32: no reserve + 允许 rehash，无返回值 ---
-
-static void BM_InsertUnique_bm15u32_noreserve_noret(benchmark::State &state, float max_load_factor) {
-    const UInt32 N = static_cast<UInt32>(state.range(0));
-    const auto keys = make_unique_keys<Key>(N);
-
-    const auto label = build_label(max_load_factor);
-
-    for (auto _ : state) {
-        bm15u32 map;
-        apply_max_load_factor(map, max_load_factor);
-
-        for (UInt32 i = 0; i < N; ++i) {
-            map.template emplace<unique_noreserve_noret_policy>(keys[i], static_cast<std::uint32_t>(i));
-        }
-
-        benchmark::DoNotOptimize(map);
-    }
-
-    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(N));
-    state.SetLabel(label);
-}
-
 // ----------------- 注册：bench_fmu32_vs_std_insert_unique -----------------
 
 void register_all_benchmarks() {
@@ -297,29 +249,17 @@ void register_all_benchmarks() {
             ("bmu32_noret_insert_unique_noreserve_" + suffix).c_str(),
             [load_factor](benchmark::State &st) { BM_InsertUnique_bmu32_noreserve_noret(st, load_factor); });
 
-        // bm15u32 (no return value)
-        auto *bm15_reserve_noret = benchmark::RegisterBenchmark(
-            ("bm15u32_noret_insert_unique_reserve_" + suffix).c_str(),
-            [load_factor](benchmark::State &st) { BM_InsertUnique_bm15u32_reserve_noret(st, load_factor); });
-
-        auto *bm15_noreserve_noret = benchmark::RegisterBenchmark(
-            ("bm15u32_noret_insert_unique_noreserve_" + suffix).c_str(),
-            [load_factor](benchmark::State &st) { BM_InsertUnique_bm15u32_noreserve_noret(st, load_factor); });
-
         for (auto size : kSizes) {
             const auto arg = static_cast<std::int64_t>(size);
 
-            // std_reserve->Arg(arg);
-            // std_noreserve->Arg(arg);
+            std_reserve->Arg(arg);
+            std_noreserve->Arg(arg);
 
-            // fm_reserve_noret->Arg(arg);
-            // fm_noreserve_noret->Arg(arg);
+            fm_reserve_noret->Arg(arg);
+            fm_noreserve_noret->Arg(arg);
 
             bm_reserve_noret->Arg(arg);
             bm_noreserve_noret->Arg(arg);
-
-            bm15_reserve_noret->Arg(arg);
-            bm15_noreserve_noret->Arg(arg);
         }
     }
 }
