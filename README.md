@@ -1,3 +1,3 @@
 "# my_cpp_lib"
-
-高雅人士正在编写妈见打头文件
+/s_hash_map
+/s_trie

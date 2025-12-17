@@ -426,7 +426,6 @@ public:
         }
 
         if (new_capacity <= capacity_) return; // 不允许缩容
-
         if (new_capacity <= k_min_capacity) new_capacity = k_min_capacity;
         else new_capacity = detail::next_power_of_two(new_capacity);
 

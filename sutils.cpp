@@ -1,5 +1,5 @@
 #include "sutils.hpp"
-#include "salias.h"
+#include "s_alias.h"
 #include <cstddef>
 
 Int2D CreateInt2D(size_t rows, size_t cols, int value) { return Int2D(rows, Int1D(cols, value)); }

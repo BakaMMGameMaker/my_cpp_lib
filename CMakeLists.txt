@@ -47,6 +47,10 @@ link_directories(
     D:/allfolders/code/advanced/cpp/benchmark-main/build/src/Release
 )
 
+add_executable(tictactoe_win32 WIN32
+    tictactoe_win32.cpp
+)
+
 # =====================================================
 #                     Target 1: Tests
 # =====================================================
